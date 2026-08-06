@@ -737,18 +737,49 @@ test("workflow resumes only an exactly matching immutable GitHub Release", async
   assert.match(workflow, /gh release upload "\$RELEASE_TAG" "\$local_path"/);
   const verification = workflow.slice(verificationIndex);
   assert.match(verification, /\.tag_name == \$tag/);
-  assert.match(verification, /\.target_commitish == \$target/);
+  assert.doesNotMatch(verification, /\.target_commitish == \$target/);
   assert.match(verification, /\.name == \$title/);
   assert.match(verification, /\.prerelease == \$prerelease/);
   assert.match(verification, /cmp "\$local_path" "\$verify_dir\/\$asset_name"/);
   assert.match(workflow, /release_target_sha: \$\{\{ steps\.request\.outputs\.release_target_sha \}\}/);
   assert.match(workflow, /RELEASE_TARGET_SHA: \$\{\{ needs\.validate\.outputs\.release_target_sha \}\}/);
-  assert.match(workflow, /--target "\$RELEASE_TARGET_SHA"/);
+  assert.doesNotMatch(workflow, /--target "\$RELEASE_TARGET_SHA"/);
   assert.match(workflow, /gh release create "\$RELEASE_TAG" --verify-tag/);
   assert.match(workflow, /candidate="requests\/\$\{release_tag\}\.json"/);
   assert.match(workflow, /git show "\$\{request_commit\}:\$candidate" >"\$addition_bytes"/);
   assert.match(workflow, /cmp --silent "\$candidate" "\$addition_bytes"/);
   assert.doesNotMatch(workflow, /manual-request\.json/);
+});
+
+test("workflow lets the verified existing tag select the release target", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const draftStep = workflow.indexOf("Create or resume immutable GitHub Release draft");
+  const verificationStep = workflow.indexOf(
+    "Validate release metadata and compare every published asset over HTTPS",
+  );
+  const publishStep = workflow.indexOf("Publish fully verified GitHub Release");
+  const feedJob = workflow.indexOf("  promote-feed:");
+  const draftGate = workflow.slice(draftStep, verificationStep);
+  const releaseMetadataGates = workflow.slice(verificationStep, feedJob);
+
+  assert.doesNotMatch(
+    draftGate,
+    /--target "\$RELEASE_TARGET_SHA"/,
+    "a supplied target commit can require workflow-write permission unavailable to GITHUB_TOKEN",
+  );
+  assert.match(
+    draftGate,
+    /gh release create "\$RELEASE_TAG" --verify-tag --draft/,
+  );
+  const tagResolution = draftGate.indexOf('tag_target="$(resolve_remote_release_tag)"');
+  const createCommand = draftGate.indexOf('gh release create "$RELEASE_TAG"');
+  assert.ok(tagResolution >= 0 && tagResolution < createCommand);
+  assert.match(draftGate, /tag_target.*RELEASE_TARGET_SHA/s);
+  assert.doesNotMatch(releaseMetadataGates, /\.target_commitish == \$target/);
+  assert.match(workflow.slice(publishStep, feedJob), /tag_target.*RELEASE_TARGET_SHA/s);
 });
 
 test("workflow preserves latest.json as a byte-verified immutable release asset", async () => {
