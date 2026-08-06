@@ -600,6 +600,71 @@ test("workflow uses a monotonic release-data feed and verifies Pages after deplo
   assert.ok(liveFetch > verifyJob);
 });
 
+test("workflow uploads one deterministic Pages archive through the pinned direct action", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const promotionStart = workflow.indexOf("  promote-feed:");
+  const deployStart = workflow.indexOf("  deploy-pages:");
+  const promotion = workflow.slice(promotionStart, deployStart);
+
+  assert.doesNotMatch(
+    promotion,
+    /actions\/upload-pages-artifact@/,
+    "the composite invokes an unpinned upload-artifact@v4 rejected by organization policy",
+  );
+  assert.match(promotion, /Create deterministic Pages artifact/);
+  for (const option of [
+    "--dereference",
+    "--hard-dereference",
+    "--sort=name",
+    "--mtime='UTC 1970-01-01'",
+    "--owner=0",
+    "--group=0",
+    "--numeric-owner",
+  ]) {
+    assert.ok(promotion.includes(option), `Pages archive must use ${option}`);
+  }
+  assert.match(promotion, /--directory data\/site/);
+  assert.match(promotion, /"\$RUNNER_TEMP\/artifact\.tar"/);
+  assert.match(
+    promotion,
+    /uses: actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4/,
+  );
+  const directUpload = promotion.slice(
+    promotion.indexOf("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"),
+  );
+  assert.match(directUpload, /name: github-pages/);
+  assert.match(directUpload, /path: \$\{\{ runner\.temp \}\}\/artifact\.tar/);
+  assert.match(directUpload, /retention-days: 1/);
+  assert.match(directUpload, /if-no-files-found: error/);
+});
+
+test("workflow rejects symlinks and special entries before Pages tar dereference", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const promotion = workflow.slice(
+    workflow.indexOf("  promote-feed:"),
+    workflow.indexOf("  deploy-pages:"),
+  );
+  const unsafeEntryGate = promotion.indexOf('unsafe_path="$(');
+  const tarCreation = promotion.indexOf("          tar \\");
+
+  assert.ok(
+    unsafeEntryGate >= 0 && unsafeEntryGate < tarCreation,
+    "symlinks and special entries must fail before tar dereferences the Pages tree",
+  );
+  assert.match(
+    promotion,
+    /find data\/site[\s\\\n]+! -type f[\s\\\n]+! -type d[\s\\\n]+-print -quit/,
+  );
+  assert.match(promotion, /Pages site contains a symlink or special file/);
+  assert.match(promotion.slice(unsafeEntryGate, tarCreation), /exit 1/);
+});
+
 test("workflow passes dispatch inputs to shell only through env", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
@@ -635,7 +700,7 @@ test("workflow pins runner, Node, and verifier tools without duplicate release s
   assert.equal(
     workflow.match(/actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/g)
       ?.length,
-    3,
+    4,
   );
 });
 
@@ -707,7 +772,6 @@ test("workflow pins every GitHub-authored action to an immutable commit", async 
     ["upload-artifact", "ea165f8d65b6e75b540449e92b4886f43607fa02", "v4"],
     ["download-artifact", "d3f86a106a0bac45b974a628896c90dbdf5c8093", "v4"],
     ["configure-pages", "983d7736d9b0ae728b81ab479565c72886d7745b", "v5"],
-    ["upload-pages-artifact", "56afc609e74202658d3ffba0e8f6dda462b719fa", "v3"],
     ["deploy-pages", "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128", "v5"],
   ];
   for (const [action, sha, version] of pins) {
