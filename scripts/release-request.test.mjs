@@ -641,6 +641,30 @@ test("workflow uploads one deterministic Pages archive through the pinned direct
   assert.match(directUpload, /if-no-files-found: error/);
 });
 
+test("workflow rejects symlinks and special entries before Pages tar dereference", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const promotion = workflow.slice(
+    workflow.indexOf("  promote-feed:"),
+    workflow.indexOf("  deploy-pages:"),
+  );
+  const unsafeEntryGate = promotion.indexOf('unsafe_path="$(');
+  const tarCreation = promotion.indexOf("          tar \\");
+
+  assert.ok(
+    unsafeEntryGate >= 0 && unsafeEntryGate < tarCreation,
+    "symlinks and special entries must fail before tar dereferences the Pages tree",
+  );
+  assert.match(
+    promotion,
+    /find data\/site[\s\\\n]+! -type f[\s\\\n]+! -type d[\s\\\n]+-print -quit/,
+  );
+  assert.match(promotion, /Pages site contains a symlink or special file/);
+  assert.match(promotion.slice(unsafeEntryGate, tarCreation), /exit 1/);
+});
+
 test("workflow passes dispatch inputs to shell only through env", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
