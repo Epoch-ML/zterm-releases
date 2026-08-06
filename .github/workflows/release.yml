@@ -1362,6 +1362,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          unsafe_path="$(
+            find data/site \
+              ! -type f \
+              ! -type d \
+              -print -quit
+          )"
+          if [[ -n "$unsafe_path" ]]; then
+            printf \
+              '::error::Pages site contains a symlink or special file: %q\n' \
+              "$unsafe_path"
+            exit 1
+          fi
           tar \
             --dereference \
             --hard-dereference \
