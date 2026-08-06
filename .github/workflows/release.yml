@@ -861,6 +861,33 @@ jobs:
           fetch-depth: 0
           path: index
 
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+
+      - name: Install pinned updater signature verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          verifier_archive="$RUNNER_TEMP/minisign-0.12-linux.tar.gz"
+          verifier_root="$RUNNER_TEMP/zterm-release-tools"
+          mkdir -p "$verifier_root"
+          curl --fail --location --silent --show-error \
+            --retry 3 --retry-all-errors \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz \
+            --output "$verifier_archive"
+          echo \
+            "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $verifier_archive" \
+            | sha256sum -c -
+          tar -xzf "$verifier_archive" -C "$verifier_root"
+          install -m 755 \
+            "$verifier_root/minisign-linux/x86_64/minisign" \
+            "$verifier_root/minisign"
+          [[ "$("$verifier_root/minisign" -v 2>&1)" == *"0.12"* ]]
+          echo "$verifier_root" >>"$GITHUB_PATH"
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ needs.validate.outputs.release_tag }}
@@ -1033,20 +1060,63 @@ jobs:
              .prerelease == $prerelease' \
             "$release_json" >/dev/null
 
-          mapfile -t local_assets < <(
-            find payload -maxdepth 1 -type f -print | sort
+          expected_assets=(
+            ZTerm.app.tar.gz
+            ZTerm.app.tar.gz.sig
+            "ZTerm_${RELEASE_VERSION}_aarch64.dmg"
+            checksums.txt
+            latest.json
+            release-metadata.json
           )
-          [[ ${#local_assets[@]} -gt 0 ]]
-          mapfile -t remote_names < <(jq -r '.assets[].name' "$release_json")
-          for asset_name in "${remote_names[@]}"; do
-            matching_local=0
-            for local_path in "${local_assets[@]}"; do
-              if [[ "$(basename "$local_path")" == "$asset_name" ]]; then
-                matching_local=$((matching_local + 1))
+          local_assets=()
+          for asset_name in "${expected_assets[@]}"; do
+            local_path="payload/$asset_name"
+            if [[ -L "$local_path" || ! -f "$local_path" ]]; then
+              echo "::error::regenerated payload is missing canonical asset: $asset_name"
+              exit 1
+            fi
+            local_assets+=("$local_path")
+          done
+          if [[ "$(find payload -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -ne 6 ]]; then
+            echo "::error::regenerated payload must contain exactly six canonical assets"
+            exit 1
+          fi
+
+          release_draft="$(jq -r .draft "$release_json")"
+          release_immutable="$(jq -r '.immutable // false' "$release_json")"
+          if [[ "$release_draft" != "true" ]]; then
+            if [[ "$release_immutable" != "true" ]]; then
+              echo "::error::an existing published release must be immutable"
+              exit 1
+            fi
+            if [[ "$(jq '.assets | length' "$release_json")" -ne 6 ]]; then
+              echo "::error::immutable release must contain exactly six canonical assets"
+              exit 1
+            fi
+            for asset_name in "${expected_assets[@]}"; do
+              asset_count="$(
+                jq --arg name "$asset_name" \
+                  '[.assets[] | select(.name == $name)] | length' "$release_json"
+              )"
+              if [[ "$asset_count" -ne 1 ]]; then
+                echo "::error::immutable release asset set is not exact: $asset_name"
+                exit 1
               fi
             done
-            if [[ $matching_local -ne 1 ]]; then
-              echo "::error::release contains unexpected or ambiguous asset: $asset_name"
+            echo "Existing immutable release will be verified from its public bytes."
+            exit 0
+          fi
+
+          mapfile -t remote_names < <(jq -r '.assets[].name' "$release_json")
+          for asset_name in "${remote_names[@]}"; do
+            known_asset=false
+            for expected_asset in "${expected_assets[@]}"; do
+              if [[ "$asset_name" == "$expected_asset" ]]; then
+                known_asset=true
+              fi
+            done
+            if [[ "$known_asset" != "true" ]]; then
+              echo "::error::draft contains unexpected asset: $asset_name"
               exit 1
             fi
           done
@@ -1060,61 +1130,66 @@ jobs:
                 '[.assets[] | select(.name == $name)] | length' "$release_json"
             )"
             if [[ "$asset_count" -eq 0 ]]; then
-              if [[ "$(jq -r .draft "$release_json")" != "true" ]]; then
-                echo "::error::published release is missing immutable asset: $asset_name"
-                exit 1
-              fi
               gh release upload "$RELEASE_TAG" "$local_path" --repo "$GITHUB_REPOSITORY"
             elif [[ "$asset_count" -eq 1 ]]; then
+              asset_id="$(
+                jq -er --arg name "$asset_name" \
+                  '.assets[] | select(.name == $name) | .id' "$release_json"
+              )"
               asset_api_url="$(
                 jq -er --arg name "$asset_name" \
                   '.assets[] | select(.name == $name) | .url' "$release_json"
               )"
-              expected_prefix="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/"
-              [[ "$asset_api_url" == "$expected_prefix"* ]] || {
-                echo "::error::asset API URL escaped the release repository"
+              expected_api_url="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+              if [[ "$asset_api_url" != "$expected_api_url" ]]; then
+                echo "::error::asset API URL escaped the exact release asset"
                 exit 1
-              }
+              fi
               curl --fail --location --retry 5 --retry-all-errors \
-                --proto '=https' --tlsv1.2 --silent --show-error \
+                --proto '=https' --proto-redir '=https' --tlsv1.2 \
+                --silent --show-error \
                 --header "Authorization: Bearer $GH_TOKEN" \
                 --header "Accept: application/octet-stream" \
                 "$asset_api_url" --output "$verify_dir/$asset_name"
               cmp "$local_path" "$verify_dir/$asset_name"
             else
-              echo "::error::release contains duplicate asset names: $asset_name"
+              echo "::error::draft contains duplicate asset names: $asset_name"
               exit 1
             fi
           done
 
           fetch_exact_release "$release_json"
-          current_draft="$(jq -r .draft "$release_json")"
           jq -e \
             --arg tag "$RELEASE_TAG" \
             --arg title "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)" \
             --rawfile body "$notes" \
-            --argjson draft "$current_draft" \
             --argjson prerelease "$expected_prerelease" \
             '.tag_name == $tag and
              .name == $title and
              .body == $body and
-             .draft == $draft and
-             .prerelease == $prerelease' \
+             .draft == true and
+             (.immutable != true) and
+             .prerelease == $prerelease and
+             (.assets | length) == 6' \
             "$release_json" >/dev/null
-          [[ "$(jq '.assets | length' "$release_json")" -eq "${#local_assets[@]}" ]]
           for local_path in "${local_assets[@]}"; do
             asset_name="$(basename "$local_path")"
-            asset_api_url="$(
+            asset_id="$(
               jq -er --arg name "$asset_name" \
                 'if ([.assets[] | select(.name == $name)] | length) == 1
-                 then .assets[] | select(.name == $name) | .url
+                 then .assets[] | select(.name == $name) | .id
                  else error("asset set is not exact")
                  end' "$release_json"
             )"
-            expected_prefix="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/"
-            [[ "$asset_api_url" == "$expected_prefix"* ]]
+            asset_api_url="$(
+              jq -er --arg name "$asset_name" \
+                '.assets[] | select(.name == $name) | .url' "$release_json"
+            )"
+            expected_api_url="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+            [[ "$asset_api_url" == "$expected_api_url" ]]
             curl --fail --location --retry 5 --retry-all-errors \
-              --proto '=https' --tlsv1.2 --silent --show-error \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --silent --show-error \
               --header "Authorization: Bearer $GH_TOKEN" \
               --header "Accept: application/octet-stream" \
               "$asset_api_url" --output "$verify_dir/$asset_name"
@@ -1207,6 +1282,7 @@ jobs:
             "The updater archive is signed independently from the macOS application signature." \
             >"$notes"
           fetch_exact_release "$release_json"
+          was_draft="$(jq -r .draft "$release_json")"
           expected_prerelease=false
           if [[ "$RELEASE_CHANNEL" == "preview" ]]; then
             expected_prerelease=true
@@ -1227,7 +1303,7 @@ jobs:
             echo "::error::release tag moved before publication"
             exit 1
           fi
-          if [[ "$(jq -r .draft "$release_json")" == "true" ]]; then
+          if [[ "$was_draft" == "true" ]]; then
             publish_options=(--repo "$GITHUB_REPOSITORY")
             if [[ "$RELEASE_CHANNEL" == "preview" ]]; then
               publish_options+=(--prerelease --latest=false)
@@ -1255,14 +1331,29 @@ jobs:
              .immutable == true and
              .prerelease == $prerelease' \
             "$release_json" >/dev/null
-          mapfile -t local_assets < <(
-            find payload -maxdepth 1 -type f -print | sort
+          expected_assets=(
+            ZTerm.app.tar.gz
+            ZTerm.app.tar.gz.sig
+            "ZTerm_${RELEASE_VERSION}_aarch64.dmg"
+            checksums.txt
+            latest.json
+            release-metadata.json
           )
-          [[ "$(jq '.assets | length' "$release_json")" -eq "${#local_assets[@]}" ]]
-          public_verify_dir="$RUNNER_TEMP/public-release-assets"
-          mkdir -p "$public_verify_dir"
-          for local_path in "${local_assets[@]}"; do
-            asset_name="$(basename "$local_path")"
+          if [[ "$(jq '.assets | length' "$release_json")" -ne 6 ]]; then
+            echo "::error::published release must contain exactly six canonical assets"
+            exit 1
+          fi
+          if [[ -e verified-release ]]; then
+            echo "::error::canonical verified-release directory already exists"
+            exit 1
+          fi
+          mkdir verified-release
+          max_binary_bytes=$((512 * 1024 * 1024))
+          max_json_bytes=$((1024 * 1024))
+          max_text_bytes=$((64 * 1024))
+          max_total_bytes=$((1024 * 1024 * 1024))
+          total_asset_bytes=0
+          for asset_name in "${expected_assets[@]}"; do
             asset_url="$(
               jq -er --arg name "$asset_name" \
                 'if ([.assets[] | select(.name == $name)] | length) == 1
@@ -1270,39 +1361,184 @@ jobs:
                  else error("asset set is not exact")
                  end' "$release_json"
             )"
+            asset_size="$(
+              jq -er --arg name "$asset_name" \
+                'if ([.assets[] | select(.name == $name)] | length) == 1
+                 then .assets[] | select(.name == $name) |
+                   .size | select(type == "number" and . > 0 and floor == .) |
+                   tostring
+                 else error("asset set is not exact")
+                 end' "$release_json"
+            )"
+            case "$asset_name" in
+              ZTerm.app.tar.gz|ZTerm_*_aarch64.dmg)
+                maximum_bytes="$max_binary_bytes"
+                ;;
+              ZTerm.app.tar.gz.sig|checksums.txt)
+                maximum_bytes="$max_text_bytes"
+                ;;
+              latest.json|release-metadata.json)
+                maximum_bytes="$max_json_bytes"
+                ;;
+              *)
+                echo "::error::unexpected canonical asset name: $asset_name"
+                exit 1
+                ;;
+            esac
+            if [[ "$asset_size" -gt "$maximum_bytes" ]]; then
+              echo "::error::$asset_name exceeds its verification size bound"
+              exit 1
+            fi
+            total_asset_bytes=$((total_asset_bytes + asset_size))
+            if [[ "$total_asset_bytes" -ge "$max_total_bytes" ]]; then
+              echo "::error::canonical asset set reaches its total size bound"
+              exit 1
+            fi
             node index/scripts/release-asset-url.mjs \
               "$asset_url" "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$asset_name" \
               >/dev/null
+            canonical_path="verified-release/$asset_name"
             curl --fail --location --retry 5 --retry-all-errors \
-              --proto '=https' --tlsv1.2 --silent --show-error \
-              "$asset_url" --output "$public_verify_dir/$asset_name"
-            cmp "$local_path" "$public_verify_dir/$asset_name"
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --max-filesize "$maximum_bytes" --silent --show-error \
+              "$asset_url" --output "$canonical_path"
+            if [[ "$was_draft" == "true" ]]; then
+              local_path="payload/$asset_name"
+              cmp "$local_path" "$canonical_path"
+            fi
           done
-          manifest_url="$(jq -r '.platforms["darwin-aarch64"].url' payload/latest.json)"
-          archive_url="$(
-            jq -er \
-              '.assets[] | select(.name == "ZTerm.app.tar.gz") | .browser_download_url' \
-              "$release_json"
+
+          node index/scripts/verify-release-payload.mjs \
+            verified-release \
+            "$release_json" \
+            "index/requests/${RELEASE_TAG}.json" \
+            "$GITHUB_REPOSITORY"
+          (cd verified-release && sha256sum -c checksums.txt)
+          openssl base64 -d -A \
+            -in verified-release/ZTerm.app.tar.gz.sig \
+            -out "$RUNNER_TEMP/updater.sig"
+          tagged_public_key="$RUNNER_TEMP/tagged-updater.pubkey"
+          git -C index show \
+            "${RELEASE_TARGET_SHA}:updater-${RELEASE_CHANNEL}.pubkey" \
+            >"$tagged_public_key"
+          [[ -s "$tagged_public_key" ]]
+          openssl base64 -d -A \
+            -in "$tagged_public_key" \
+            -out "$RUNNER_TEMP/updater.pubkey"
+          minisign -Vm verified-release/ZTerm.app.tar.gz \
+            -x "$RUNNER_TEMP/updater.sig" \
+            -p "$RUNNER_TEMP/updater.pubkey"
+
+          python3 - verified-release/ZTerm.app.tar.gz "$RELEASE_CHANNEL" <<'PY'
+          import sys
+          import tarfile
+
+          expected = {
+              "ZTerm.app": "directory",
+              "ZTerm.app/Contents": "directory",
+              "ZTerm.app/Contents/_CodeSignature": "directory",
+              "ZTerm.app/Contents/MacOS": "directory",
+              "ZTerm.app/Contents/Info.plist": "file",
+              "ZTerm.app/Contents/PkgInfo": "file",
+              "ZTerm.app/Contents/MacOS/ZTerm": "file",
+              "ZTerm.app/Contents/_CodeSignature/CodeResources": "file",
+          }
+          if sys.argv[2] == "stable":
+              expected["ZTerm.app/Contents/CodeResources"] = "file"
+          max_member_bytes = 512 * 1024 * 1024
+          max_expanded_bytes = 1024 * 1024 * 1024
+          with tarfile.open(sys.argv[1], "r:gz") as archive:
+              actual = {}
+              expanded_bytes = 0
+              for member in archive:
+                  if len(actual) >= len(expected):
+                      raise SystemExit("archive contains too many members")
+                  if member.name in actual:
+                      raise SystemExit(f"duplicate archive member: {member.name}")
+                  if member.isdir():
+                      kind = "directory"
+                  elif member.isfile():
+                      kind = "file"
+                      if member.size > max_member_bytes:
+                          raise SystemExit(
+                              f"archive member exceeds size bound: {member.name}"
+                          )
+                      expanded_bytes += member.size
+                      if expanded_bytes > max_expanded_bytes:
+                          raise SystemExit("archive exceeds expanded-size bound")
+                  else:
+                      raise SystemExit(
+                          f"unsafe archive member type: {member.name}"
+                      )
+                  actual[member.name] = kind
+          if actual != expected:
+              raise SystemExit(f"archive member contract mismatch: {actual!r}")
+          PY
+          extract_dir="$RUNNER_TEMP/canonical-zterm-app"
+          mkdir "$extract_dir"
+          tar \
+            --extract \
+            --gzip \
+            --file verified-release/ZTerm.app.tar.gz \
+            --directory "$extract_dir" \
+            --no-same-owner \
+            --no-same-permissions
+          unsafe_path="$(
+            find "$extract_dir" ! -type d ! -type f -print -quit
           )"
-          canonical_manifest_url="$(
-            node index/scripts/release-asset-url.mjs \
-              "$manifest_url" "$GITHUB_REPOSITORY" "$RELEASE_TAG" \
-              ZTerm.app.tar.gz
-          )"
-          canonical_archive_url="$(
-            node index/scripts/release-asset-url.mjs \
-              "$archive_url" "$GITHUB_REPOSITORY" "$RELEASE_TAG" \
-              ZTerm.app.tar.gz
-          )"
-          [[ "$canonical_manifest_url" == "$canonical_archive_url" ]]
-          cmp payload/ZTerm.app.tar.gz \
-            "$public_verify_dir/ZTerm.app.tar.gz"
+          [[ -z "$unsafe_path" ]]
+          expected_file_count=4
+          if [[ "$RELEASE_CHANNEL" == "stable" ]]; then
+            expected_file_count=5
+            [[ -s "$extract_dir/ZTerm.app/Contents/CodeResources" ]]
+          fi
+          [[ "$(find "$extract_dir" -type f | wc -l | tr -d ' ')" -eq "$expected_file_count" ]]
+          app="$extract_dir/ZTerm.app"
+          executable="$app/Contents/MacOS/ZTerm"
+          [[ -x "$executable" && -f "$executable" && ! -L "$executable" ]]
+          file -b "$executable" | grep -F "Mach-O 64-bit executable arm64" >/dev/null
+          printf 'APPL????' | cmp - "$app/Contents/PkgInfo"
+          [[ -s "$app/Contents/_CodeSignature/CodeResources" ]]
+          expected_bundle_version="${RELEASE_VERSION%%[-+]*}"
+          python3 - "$app/Contents/Info.plist" "$expected_bundle_version" <<'PY'
+          import plistlib
+          import sys
+
+          with open(sys.argv[1], "rb") as plist_file:
+              info = plistlib.load(plist_file)
+          expected = {
+              "CFBundleDisplayName": "ZTerm",
+              "CFBundleExecutable": "ZTerm",
+              "CFBundleIdentifier": "dev.zerg.zterm",
+              "CFBundleName": "ZTerm",
+              "CFBundlePackageType": "APPL",
+              "CFBundleShortVersionString": sys.argv[2],
+              "CFBundleVersion": sys.argv[2],
+              "LSMinimumSystemVersion": "12.0",
+              "NSHighResolutionCapable": True,
+          }
+          if info != expected:
+              raise SystemExit(f"Info.plist contract mismatch: {info!r}")
+          PY
+
+          tag_target="$(resolve_remote_release_tag)"
+          if [[ "$tag_target" != "$RELEASE_TARGET_SHA" ]]; then
+            echo "::error::release tag moved during canonical asset verification"
+            exit 1
+          fi
+
+      - name: Upload canonical verified release payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-release
+          path: verified-release/
+          if-no-files-found: error
+          retention-days: 14
 
   promote-feed:
     name: Promote monotonic updater feed on release-data
     needs:
       - validate
-      - sign
       - publish
     runs-on: ubuntu-24.04
     environment: zterm-feed
@@ -1327,7 +1563,7 @@ jobs:
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ needs.validate.outputs.release_tag }}
+          name: verified-release
           path: payload
 
       - name: Commit updater manifest after asset verification
@@ -1419,7 +1655,7 @@ jobs:
     name: Verify the exact deployed updater feed over HTTPS
     needs:
       - validate
-      - sign
+      - publish
       - deploy-pages
     runs-on: ubuntu-24.04
     permissions:
@@ -1430,7 +1666,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ needs.validate.outputs.release_tag }}
+          name: verified-release
           path: payload
 
       - name: Verify the published channel manifest over HTTPS

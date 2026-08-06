@@ -3,6 +3,7 @@ export default {
     "scripts/release-request.mjs:18-130",
     "scripts/feed-policy.mjs:14-125",
     "scripts/release-asset-url.mjs:12-83",
+    "scripts/verify-release-payload.mjs:25-407",
   ],
   testRunner: "tap",
   tap: {
@@ -10,6 +11,7 @@ export default {
       "scripts/feed-policy.test.mjs",
       "scripts/release-asset-url.test.mjs",
       "scripts/release-request.test.mjs",
+      "scripts/verify-release-payload.test.mjs",
     ],
   },
   coverageAnalysis: "perTest",
