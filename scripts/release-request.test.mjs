@@ -656,6 +656,30 @@ test("workflow uses a monotonic release-data feed and verifies Pages after deplo
   assert.ok(liveFetch > verifyJob);
 });
 
+test("Pages deployment survives a queue longer than ten minutes without poisoning recovery", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const deployJob = workflow.slice(
+    workflow.indexOf("  deploy-pages:"),
+    workflow.indexOf("  verify-pages:"),
+  );
+
+  assert.doesNotMatch(
+    deployJob,
+    /actions\/deploy-pages@/,
+    "the upstream action cancels queued deployments after its hard ten-minute limit",
+  );
+  assert.match(deployJob, /timeout-minutes: 35/);
+  assert.match(deployJob, /node scripts\/deploy-pages\.mjs/);
+  assert.match(deployJob, /PAGES_DEPLOY_TIMEOUT_MS: "1800000"/);
+  assert.match(
+    deployJob,
+    /PAGES_ARTIFACT_ID: \$\{\{ needs\.promote-feed\.outputs\.pages_artifact_id \}\}/,
+  );
+});
+
 test("workflow uploads one deterministic Pages archive through the pinned direct action", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
