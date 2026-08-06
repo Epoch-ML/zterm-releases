@@ -509,6 +509,52 @@ test("workflow isolates Apple signing and notarization on a fresh non-executing 
   assert.match(workflow, /sign:\s+[\s\S]*needs:\s+- validate\s+- apple-sign/);
 });
 
+test("workflow reconstructs and fail-closed validates the flattened unsigned app artifact", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const appleJob = workflow.slice(
+    workflow.indexOf("  apple-sign:"),
+    workflow.indexOf("  verify-signed:"),
+  );
+  const downloadStep = appleJob.slice(
+    appleJob.indexOf("actions/download-artifact@"),
+    appleJob.indexOf("Validate the non-executable product payload"),
+  );
+  const validationStep = appleJob.slice(
+    appleJob.indexOf("Validate the non-executable product payload"),
+    appleJob.indexOf("Require and import stable Apple identity"),
+  );
+
+  assert.match(
+    downloadStep,
+    /path: unsigned\/ZTerm\.app/,
+    "upload-artifact flattens the app directory, so download must recreate ZTerm.app",
+  );
+  assert.doesNotMatch(
+    validationStep,
+    /^\s*\[\[/m,
+    "standalone [[ assertions do not fail a Bash errexit script",
+  );
+  assert.match(validationStep, /test -d "\$app"/);
+  assert.match(validationStep, /test -z "\$\(find .* -type l -print -quit\)"/);
+  assert.match(
+    validationStep,
+    /test "\$\(find .* -type f \| wc -l \| tr -d ' '\)" = "3"/,
+  );
+  assert.match(validationStep, /test -f "\$app\/Contents\/Info\.plist"/);
+  assert.match(validationStep, /test -f "\$app\/Contents\/PkgInfo"/);
+  assert.match(validationStep, /test -f "\$executable"/);
+  assert.match(validationStep, /test -z "\$unexpected"/);
+  assert.match(validationStep, /file -b "\$executable" \| grep -F arm64/);
+  assert.match(validationStep, /Print :CFBundleIdentifier/);
+  assert.match(validationStep, /grep -Fx dev\.zerg\.zterm/);
+  assert.match(validationStep, /Print :CFBundleExecutable/);
+  assert.match(validationStep, /grep -Fx ZTerm/);
+  assert.doesNotMatch(validationStep, /\$executable --version|ZTERM_SMOKE_BINARY/);
+});
+
 test("workflow separates source, Apple, updater, and feed credential environments", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
