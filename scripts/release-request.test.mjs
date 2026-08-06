@@ -647,12 +647,12 @@ test("workflow uses a monotonic release-data feed and verifies Pages after deplo
   assert.match(workflow, /node .*scripts\/feed-policy\.mjs/);
   assert.doesNotMatch(workflow, /git push origin HEAD:main/);
   const deployJob = workflow.indexOf("  deploy-pages:");
-  const deployAction = workflow.indexOf("actions/deploy-pages@", deployJob);
+  const deployScript = workflow.indexOf("node scripts/deploy-pages.mjs", deployJob);
   const verifyJob = workflow.indexOf("  verify-pages:");
   const liveFetch = workflow.indexOf("Verify the published channel manifest over HTTPS");
   assert.ok(deployJob > 0);
-  assert.ok(deployAction > deployJob);
-  assert.ok(verifyJob > deployAction);
+  assert.ok(deployScript > deployJob);
+  assert.ok(verifyJob > deployScript);
   assert.ok(liveFetch > verifyJob);
 });
 
@@ -665,7 +665,19 @@ test("Pages deployment survives a queue longer than ten minutes without poisonin
     workflow.indexOf("  deploy-pages:"),
     workflow.indexOf("  verify-pages:"),
   );
+  const promotionJob = workflow.slice(
+    workflow.indexOf("  promote-feed:"),
+    workflow.indexOf("  deploy-pages:"),
+  );
 
+  assert.match(
+    promotionJob,
+    /pages_artifact_id: \$\{\{ steps\.pages-artifact\.outputs\.artifact-id \}\}/,
+  );
+  assert.match(
+    promotionJob,
+    /id: pages-artifact[\s\S]*uses: actions\/upload-artifact@/,
+  );
   assert.doesNotMatch(
     deployJob,
     /actions\/deploy-pages@/,
@@ -852,7 +864,6 @@ test("workflow pins every GitHub-authored action to an immutable commit", async 
     ["upload-artifact", "ea165f8d65b6e75b540449e92b4886f43607fa02", "v4"],
     ["download-artifact", "d3f86a106a0bac45b974a628896c90dbdf5c8093", "v4"],
     ["configure-pages", "983d7736d9b0ae728b81ab479565c72886d7745b", "v5"],
-    ["deploy-pages", "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128", "v5"],
   ];
   for (const [action, sha, version] of pins) {
     assert.match(workflow, new RegExp(`actions/${action}@${sha} # ${version}`));
