@@ -782,6 +782,41 @@ test("workflow lets the verified existing tag select the release target", async 
   assert.match(workflow.slice(publishStep, feedJob), /tag_target.*RELEASE_TARGET_SHA/s);
 });
 
+test("workflow resolves draft and published releases through one bounded exact ID lookup", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const verificationStep = workflow.indexOf(
+    "Validate release metadata and compare every published asset over HTTPS",
+  );
+  const feedJob = workflow.indexOf("  promote-feed:");
+  const releaseGates = workflow.slice(verificationStep, feedJob);
+
+  assert.doesNotMatch(
+    releaseGates,
+    /releases\/tags\/\$RELEASE_TAG/,
+    "GitHub's release-by-tag endpoint returns 404 for draft releases",
+  );
+  assert.match(releaseGates, /max_release_pages=100/);
+  assert.match(
+    releaseGates,
+    /releases\?per_page=100&page=\$page/,
+  );
+  assert.match(releaseGates, /release lookup exceeded bounded pagination/);
+  assert.match(releaseGates, /match_count.*-ne 1/s);
+  assert.match(
+    releaseGates,
+    /gh api "repos\/\$GITHUB_REPOSITORY\/releases\/\$release_id"/,
+  );
+  assert.match(releaseGates, /\.id == \$id and \.tag_name == \$tag/);
+  assert.equal(
+    releaseGates.match(/fetch_exact_release "\$release_json"/g)?.length,
+    4,
+    "draft creation, asset upload, publication, and immutability must each re-read the exact release",
+  );
+});
+
 test("workflow preserves latest.json as a byte-verified immutable release asset", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
