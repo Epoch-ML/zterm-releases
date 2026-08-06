@@ -406,7 +406,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ needs.validate.outputs.release_tag }}-unsigned-app
-          path: unsigned
+          path: unsigned/ZTerm.app
 
       - name: Validate the non-executable product payload
         shell: bash
@@ -414,23 +414,24 @@ jobs:
           set -euo pipefail
           app="$GITHUB_WORKSPACE/unsigned/ZTerm.app"
           executable="$app/Contents/MacOS/ZTerm"
-          [[ -d "$app" ]]
-          [[ -z "$(find "$GITHUB_WORKSPACE/unsigned" -type l -print -quit)" ]]
-          [[ "$(find "$GITHUB_WORKSPACE/unsigned" -type f | wc -l | tr -d ' ')" == "3" ]]
-          [[ -f "$app/Contents/Info.plist" ]]
-          [[ -f "$app/Contents/PkgInfo" ]]
-          [[ -f "$executable" ]]
+          test -d "$app"
+          test -z "$(find "$GITHUB_WORKSPACE/unsigned" -type l -print -quit)"
+          test "$(find "$GITHUB_WORKSPACE/unsigned" -type f | wc -l | tr -d ' ')" = "3"
+          test -f "$app/Contents/Info.plist"
+          test -f "$app/Contents/PkgInfo"
+          test -f "$executable"
           unexpected="$({
             find "$GITHUB_WORKSPACE/unsigned" -type f \
               ! -path "$app/Contents/Info.plist" \
               ! -path "$app/Contents/PkgInfo" \
               ! -path "$executable"
           } | head -n 1)"
-          [[ -z "$unexpected" ]]
+          test -z "$unexpected"
           chmod 755 "$executable"
-          [[ "$(file -b "$executable")" == *"arm64"* ]]
+          file -b "$executable" | grep -F arm64 >/dev/null
           expected_bundle_version="${RELEASE_VERSION%%[-+]*}"
-          [[ "$expected_bundle_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          printf '%s\n' "$expected_bundle_version" \
+            | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
             "$app/Contents/Info.plist" | grep -Fx dev.zerg.zterm
           /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
