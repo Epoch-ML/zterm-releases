@@ -1558,6 +1558,8 @@ jobs:
     environment: zterm-feed
     permissions:
       contents: read
+    outputs:
+      pages_artifact_id: ${{ steps.pages-artifact.outputs.artifact-id }}
     env:
       RELEASE_CHANNEL: ${{ needs.validate.outputs.channel }}
       RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
@@ -1642,6 +1644,7 @@ jobs:
           [[ -s "$RUNNER_TEMP/artifact.tar" ]]
 
       - name: Upload pinned Pages artifact
+        id: pages-artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: github-pages
@@ -1653,7 +1656,9 @@ jobs:
     name: Deploy verified updater site
     needs: promote-feed
     runs-on: ubuntu-24.04
+    timeout-minutes: 35
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
@@ -1662,8 +1667,21 @@ jobs:
     outputs:
       page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+
       - id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+        name: Deploy Pages without cancelling a recoverable queue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PAGES_ARTIFACT_ID: ${{ needs.promote-feed.outputs.pages_artifact_id }}
+          PAGES_DEPLOY_TIMEOUT_MS: "1800000"
+        run: node scripts/deploy-pages.mjs
 
   verify-pages:
     name: Verify the exact deployed updater feed over HTTPS
