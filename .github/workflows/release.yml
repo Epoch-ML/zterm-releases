@@ -962,6 +962,53 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          fetch_exact_release() {
+            local output_path="$1"
+            local max_release_pages=100
+            local page page_count page_json matches_json match_count release_id
+            matches_json="$RUNNER_TEMP/release-matches.jsonl"
+            : >"$matches_json"
+            for ((page = 1; page <= max_release_pages; page++)); do
+              page_json="$RUNNER_TEMP/releases-page-$page.json"
+              gh api \
+                "repos/$GITHUB_REPOSITORY/releases?per_page=100&page=$page" \
+                >"$page_json"
+              jq -e 'type == "array" and length <= 100' \
+                "$page_json" >/dev/null
+              jq -c --arg tag "$RELEASE_TAG" \
+                '.[] | select(.tag_name == $tag)' "$page_json" \
+                >>"$matches_json"
+              page_count="$(jq 'length' "$page_json")"
+              if [[ "$page_count" -lt 100 ]]; then
+                break
+              fi
+              if [[ "$page" -eq "$max_release_pages" ]]; then
+                echo "::error::release lookup exceeded bounded pagination"
+                exit 1
+              fi
+            done
+            match_count="$(wc -l <"$matches_json" | tr -d '[:space:]')"
+            if [[ "$match_count" -ne 1 ]]; then
+              echo "::error::expected exactly one release for tag $RELEASE_TAG; found $match_count"
+              exit 1
+            fi
+            release_id="$(
+              jq -er \
+                '.id | select(type == "number" and . > 0 and floor == .) | tostring' \
+                "$matches_json"
+            )"
+            [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || {
+              echo "::error::release lookup returned an invalid release ID"
+              exit 1
+            }
+            gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+              >"$output_path"
+            jq -e \
+              --argjson id "$release_id" \
+              --arg tag "$RELEASE_TAG" \
+              '.id == $id and .tag_name == $tag' \
+              "$output_path" >/dev/null
+          }
           release_json="$RUNNER_TEMP/release.json"
           notes="$RUNNER_TEMP/expected-release-notes.md"
           printf '%s\n\n%s\n\n%s' \
@@ -969,7 +1016,7 @@ jobs:
             "Built from immutable Epoch-ML/zerg source commit \`$SOURCE_SHA\`." \
             "The updater archive is signed independently from the macOS application signature." \
             >"$notes"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$release_json"
+          fetch_exact_release "$release_json"
           expected_prerelease=false
           if [[ "$RELEASE_CHANNEL" == "preview" ]]; then
             expected_prerelease=true
@@ -1040,7 +1087,7 @@ jobs:
             fi
           done
 
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$release_json"
+          fetch_exact_release "$release_json"
           current_draft="$(jq -r .draft "$release_json")"
           jq -e \
             --arg tag "$RELEASE_TAG" \
@@ -1085,6 +1132,53 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          fetch_exact_release() {
+            local output_path="$1"
+            local max_release_pages=100
+            local page page_count page_json matches_json match_count release_id
+            matches_json="$RUNNER_TEMP/release-matches.jsonl"
+            : >"$matches_json"
+            for ((page = 1; page <= max_release_pages; page++)); do
+              page_json="$RUNNER_TEMP/releases-page-$page.json"
+              gh api \
+                "repos/$GITHUB_REPOSITORY/releases?per_page=100&page=$page" \
+                >"$page_json"
+              jq -e 'type == "array" and length <= 100' \
+                "$page_json" >/dev/null
+              jq -c --arg tag "$RELEASE_TAG" \
+                '.[] | select(.tag_name == $tag)' "$page_json" \
+                >>"$matches_json"
+              page_count="$(jq 'length' "$page_json")"
+              if [[ "$page_count" -lt 100 ]]; then
+                break
+              fi
+              if [[ "$page" -eq "$max_release_pages" ]]; then
+                echo "::error::release lookup exceeded bounded pagination"
+                exit 1
+              fi
+            done
+            match_count="$(wc -l <"$matches_json" | tr -d '[:space:]')"
+            if [[ "$match_count" -ne 1 ]]; then
+              echo "::error::expected exactly one release for tag $RELEASE_TAG; found $match_count"
+              exit 1
+            fi
+            release_id="$(
+              jq -er \
+                '.id | select(type == "number" and . > 0 and floor == .) | tostring' \
+                "$matches_json"
+            )"
+            [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || {
+              echo "::error::release lookup returned an invalid release ID"
+              exit 1
+            }
+            gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+              >"$output_path"
+            jq -e \
+              --argjson id "$release_id" \
+              --arg tag "$RELEASE_TAG" \
+              '.id == $id and .tag_name == $tag' \
+              "$output_path" >/dev/null
+          }
           resolve_remote_release_tag() {
             local remote_refs tag_commit tag_object
             remote_refs="$(
@@ -1112,7 +1206,7 @@ jobs:
             "Built from immutable Epoch-ML/zerg source commit \`$SOURCE_SHA\`." \
             "The updater archive is signed independently from the macOS application signature." \
             >"$notes"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$release_json"
+          fetch_exact_release "$release_json"
           expected_prerelease=false
           if [[ "$RELEASE_CHANNEL" == "preview" ]]; then
             expected_prerelease=true
@@ -1148,7 +1242,7 @@ jobs:
             echo "::error::published release tag does not point to the immutable request commit"
             exit 1
           fi
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$release_json"
+          fetch_exact_release "$release_json"
           jq -e \
             --arg tag "$RELEASE_TAG" \
             --arg title "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)" \
