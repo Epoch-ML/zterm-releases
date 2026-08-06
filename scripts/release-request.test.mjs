@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 
 import {
@@ -11,6 +13,60 @@ import {
 } from "./release-request.mjs";
 
 const SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567";
+const execFileAsync = promisify(execFile);
+
+function extractCanonicalArchiveVerifier(workflow) {
+  const invocation =
+    '          python3 - verified-release/ZTerm.app.tar.gz "$RELEASE_CHANNEL" <<\'PY\'\n';
+  const start = workflow.indexOf(invocation);
+  assert.ok(start >= 0, "canonical archive verifier must be present");
+  const bodyStart = start + invocation.length;
+  const bodyEnd = workflow.indexOf("\n          PY", bodyStart);
+  assert.ok(bodyEnd > bodyStart, "canonical archive verifier must have a bounded body");
+  return workflow
+    .slice(bodyStart, bodyEnd)
+    .split("\n")
+    .map((line) => line.slice(10))
+    .join("\n");
+}
+
+async function writeMachOArchive(path, cpuType) {
+  const builder = String.raw`
+import io
+import struct
+import sys
+import tarfile
+
+archive_path = sys.argv[1]
+cpu_type = int(sys.argv[2], 0)
+directories = [
+    "ZTerm.app",
+    "ZTerm.app/Contents",
+    "ZTerm.app/Contents/_CodeSignature",
+    "ZTerm.app/Contents/MacOS",
+]
+files = {
+    "ZTerm.app/Contents/Info.plist": b"fixture plist",
+    "ZTerm.app/Contents/PkgInfo": b"APPL????",
+    "ZTerm.app/Contents/MacOS/ZTerm": struct.pack(
+        "<IIIIIIII", 0xFEEDFACF, cpu_type, 0, 2, 0, 0, 0, 0
+    ),
+    "ZTerm.app/Contents/_CodeSignature/CodeResources": b"fixture signature",
+}
+with tarfile.open(archive_path, "w:gz") as archive:
+    for name in directories:
+        member = tarfile.TarInfo(name)
+        member.type = tarfile.DIRTYPE
+        member.mode = 0o755
+        archive.addfile(member)
+    for name, contents in files.items():
+        member = tarfile.TarInfo(name)
+        member.size = len(contents)
+        member.mode = 0o755 if name.endswith("/ZTerm") else 0o644
+        archive.addfile(member, io.BytesIO(contents))
+`;
+  await execFileAsync("python3", ["-c", builder, path, String(cpuType)]);
+}
 
 function request(overrides = {}) {
   return {
@@ -956,6 +1012,47 @@ test("workflow recovers immutable releases only from canonical public bytes", as
     promotionJobs,
     /name: \$\{\{ needs\.validate\.outputs\.release_tag \}\}/,
     "no downstream publication job may consume regenerated signer output",
+  );
+});
+
+test("canonical archive verification accepts arm64 and rejects x86_64 Mach-O", async (t) => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const verifier = extractCanonicalArchiveVerifier(workflow);
+  const directory = await mkdtemp(join(tmpdir(), "zterm-archive-verifier-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const verifierPath = join(directory, "verify_archive.py");
+  const armArchive = join(directory, "arm64.tar.gz");
+  const x86Archive = join(directory, "x86_64.tar.gz");
+  await writeFile(verifierPath, verifier);
+  await writeMachOArchive(armArchive, 0x0100000c);
+  await writeMachOArchive(x86Archive, 0x01000007);
+
+  const accepted = await execFileAsync("python3", [
+    verifierPath,
+    armArchive,
+    "preview",
+  ]);
+  assert.equal(accepted.stderr, "");
+  await assert.rejects(
+    execFileAsync("python3", [verifierPath, x86Archive, "preview"]),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /Mach-O.*arm64/);
+      return true;
+    },
+  );
+
+  const publishJob = workflow.slice(
+    workflow.indexOf("  publish:"),
+    workflow.indexOf("  promote-feed:"),
+  );
+  assert.doesNotMatch(
+    publishJob,
+    /file -b "\$executable" \| grep -F "Mach-O 64-bit executable arm64"/,
+    "architecture validation must not depend on platform-specific file(1) wording",
   );
 });
 
