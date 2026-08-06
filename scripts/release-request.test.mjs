@@ -348,11 +348,14 @@ test("reads only bounded regular JSON request files", async () => {
   }
 });
 
-test("workflow performs isolated exact-SHA and exact-tag checkout with GitHub host metadata", async () => {
+test("workflow performs an authenticated, LFS-bounded exact source checkout", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
     "utf8",
   );
+  const checkoutStart = workflow.indexOf("- name: Check out the exact source commit and tag");
+  const checkoutEnd = workflow.indexOf("- name: Verify source commit", checkoutStart);
+  const checkoutStep = workflow.slice(checkoutStart, checkoutEnd);
   const metaIndex = workflow.indexOf("https://api.github.com/meta");
   const initIndex = workflow.indexOf("git init --ref-format=reftable source");
   const commitFetchIndex = workflow.indexOf(
@@ -365,7 +368,16 @@ test("workflow performs isolated exact-SHA and exact-tag checkout with GitHub ho
   assert.ok(initIndex > metaIndex, "source checkout must use an isolated reftable repository");
   assert.ok(commitFetchIndex > initIndex, "only the requested source SHA may be fetched");
   assert.ok(tagFetchIndex > commitFetchIndex, "only the matching tag may be fetched");
-  assert.match(workflow, /SOURCE_DEPLOY_KEY: \$\{\{ secrets\.ZERG_SOURCE_DEPLOY_KEY \}\}/);
+  assert.match(checkoutStep, /SOURCE_DEPLOY_KEY: \$\{\{ secrets\.ZERG_SOURCE_DEPLOY_KEY \}\}/);
+  assert.match(checkoutStep, /GITHUB_META_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(
+    checkoutStep,
+    /--header "Authorization: Bearer \$GITHUB_META_TOKEN"/,
+  );
+  assert.match(
+    checkoutStep,
+    /GIT_LFS_SKIP_SMUDGE=1 git -C source checkout --detach "\$EXPECTED_SHA"/,
+  );
 });
 
 test("workflow refuses a tracked symbolic-link release request", async () => {
