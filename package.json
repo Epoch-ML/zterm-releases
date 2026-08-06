@@ -1,0 +1,18 @@
+{
+  "name": "zterm-releases",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test scripts/*.test.mjs",
+    "test:mutation": "stryker run"
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "9.6.1",
+    "@stryker-mutator/tap-runner": "9.6.1",
+    "@tauri-apps/cli": "2.8.4"
+  },
+  "overrides": {
+    "qs": "6.15.3"
+  }
+}

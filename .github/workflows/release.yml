@@ -1,0 +1,1333 @@
+name: Build and publish ZTerm
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        type: choice
+        required: true
+        default: preview
+        options:
+          - preview
+          - stable
+      version:
+        description: Strict SemVer without a v prefix
+        type: string
+        required: true
+      source_sha:
+        description: Exact 40-character Epoch-ML/zerg commit SHA
+        type: string
+        required: true
+
+concurrency:
+  group: zterm-desktop-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate immutable request
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      channel: ${{ steps.request.outputs.channel }}
+      release_tag: ${{ steps.request.outputs.release_tag }}
+      requested_at: ${{ steps.request.outputs.requested_at }}
+      release_target_sha: ${{ steps.request.outputs.release_target_sha }}
+      source_ref: ${{ steps.request.outputs.source_ref }}
+      source_sha: ${{ steps.request.outputs.source_sha }}
+      version: ${{ steps.request.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install and audit locked release policy dependencies
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm audit --audit-level=moderate
+
+      - name: Test release policy
+        run: npm test
+
+      - id: request
+        name: Resolve and validate exactly one request
+        env:
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
+          INPUT_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_path="$RUNNER_TEMP/release-request.json"
+
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::public releases must be dispatched from protected main"
+            exit 1
+          fi
+          if [[ "$INPUT_CHANNEL" == "stable" ]]; then
+            release_tag="zterm-v${INPUT_VERSION}"
+          elif [[ "$INPUT_CHANNEL" == "preview" ]]; then
+            release_tag="zterm-preview-v${INPUT_VERSION}"
+          else
+            echo "::error::release channel must be preview or stable"
+            exit 1
+          fi
+          candidate="requests/${release_tag}.json"
+          if [[ -L "$candidate" || ! -f "$candidate" ]]; then
+            echo "::error::release dispatch requires the existing immutable $candidate"
+            exit 1
+          fi
+
+          if [[ ! "$candidate" =~ ^requests/[0-9A-Za-z._+-]+\.json$ || -L "$candidate" || ! -f "$candidate" ]]; then
+            echo "::error::the request must be one regular non-symlink requests/*.json file"
+            exit 1
+          fi
+          mapfile -t addition_commits < <(
+            git log --format=%H --diff-filter=A -- "$candidate"
+          )
+          if [[ ${#addition_commits[@]} -ne 1 ]]; then
+            echo "::error::the request must have exactly one immutable addition commit"
+            exit 1
+          fi
+          request_commit="${addition_commits[0]}"
+          git merge-base --is-ancestor "$request_commit" "$GITHUB_SHA"
+          read -r -a commit_and_parents <<<"$(git rev-list --parents -n 1 "$request_commit")"
+          if [[ ${#commit_and_parents[@]} -ne 2 ]]; then
+            echo "::error::the request addition must be a single-parent commit"
+            exit 1
+          fi
+          mapfile -d '' -t addition_changes < <(
+            git diff --name-status --no-renames -z \
+              "${request_commit}^" "$request_commit"
+          )
+          if [[
+            ${#addition_changes[@]} -ne 2 ||
+            "${addition_changes[0]}" != "A" ||
+            "${addition_changes[1]}" != "$candidate"
+          ]]; then
+            echo "::error::the request addition commit must add only this request"
+            exit 1
+          fi
+          request_mode="$(git ls-tree "$request_commit" -- "$candidate" | cut -d ' ' -f 1)"
+          if [[ "$request_mode" != "100644" ]]; then
+            echo "::error::the immutable request must be a normal non-executable file"
+            exit 1
+          fi
+          addition_bytes="$RUNNER_TEMP/zterm-request-at-addition.json"
+          git show "${request_commit}:$candidate" >"$addition_bytes"
+          cmp --silent "$candidate" "$addition_bytes" || {
+            echo "::error::request bytes changed after their immutable addition commit"
+            exit 1
+          }
+
+          node scripts/release-request.mjs "$candidate" >"$request_path"
+          jq -e \
+            --arg channel "$INPUT_CHANNEL" \
+            --arg version "$INPUT_VERSION" \
+            --arg source_sha "$INPUT_SOURCE_SHA" \
+            '.channel == $channel and .version == $version and .source_sha == $source_sha' \
+            "$request_path" >/dev/null || {
+              echo "::error::dispatch inputs do not exactly match the immutable request"
+              exit 1
+            }
+
+          release_tag="$(jq -r .release_tag "$request_path")"
+          if [[ "$candidate" != "requests/${release_tag}.json" ]]; then
+            echo "::error::request filename must be requests/${release_tag}.json"
+            exit 1
+          fi
+          remote_refs="$(
+            git ls-remote --tags origin \
+              "refs/tags/$release_tag" "refs/tags/$release_tag^{}"
+          )"
+          tag_object="$(
+            awk -v ref="refs/tags/$release_tag" '$2 == ref { print $1 }' \
+              <<<"$remote_refs"
+          )"
+          tag_commit="$(
+            awk -v ref="refs/tags/$release_tag^{}" '$2 == ref { print $1 }' \
+              <<<"$remote_refs"
+          )"
+          if [[ -n "$tag_commit" ]]; then
+            tag_target="$tag_commit"
+          else
+            tag_target="$tag_object"
+          fi
+          if [[ -z "$tag_target" ]]; then
+            echo "::error::public release tag $release_tag does not exist"
+            exit 1
+          fi
+          if [[ "$tag_target" != "$request_commit" ]]; then
+            echo "::error::public release tag must point to the immutable request addition commit"
+            exit 1
+          fi
+          echo "release_target_sha=$request_commit" >>"$GITHUB_OUTPUT"
+          for field in channel release_tag requested_at source_ref source_sha version; do
+            printf '%s=%s\n' "$field" "$(jq -r ".$field" "$request_path")" \
+              >>"$GITHUB_OUTPUT"
+          done
+
+  build:
+    name: Build Apple Silicon release
+    needs: validate
+    runs-on: macos-15
+    environment: zterm-source
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+      RUST_TOOLCHAIN: "1.88.0"
+      ZTERM_BUNDLE_ROOT: ${{ github.workspace }}/source/ztc/dist/zterm-release-bundle
+      ZTERM_RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+      ZTERM_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      ZTERM_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      ZTERM_UPDATE_CHANNEL: ${{ needs.validate.outputs.channel }}
+      ZTERM_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: release-index
+          persist-credentials: false
+
+      - name: Require source credential and Apple Silicon
+        env:
+          SOURCE_DEPLOY_KEY: ${{ secrets.ZERG_SOURCE_DEPLOY_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == "arm64" ]] || {
+            echo "::error::the release runner must be Apple Silicon"
+            exit 1
+          }
+          if [[ -z "$SOURCE_DEPLOY_KEY" ]]; then
+            echo "::error::required release secret is unavailable: SOURCE_DEPLOY_KEY"
+            exit 1
+          fi
+
+      - name: Check out the exact source commit and tag
+        env:
+          EXPECTED_REF: ${{ needs.validate.outputs.source_ref }}
+          EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
+          SOURCE_DEPLOY_KEY: ${{ secrets.ZERG_SOURCE_DEPLOY_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/zterm-source-deploy-key"
+          known_hosts_path="$RUNNER_TEMP/zterm-github-known-hosts"
+          github_meta_path="$RUNNER_TEMP/zterm-github-meta.json"
+          cleanup() {
+            rm -f "$key_path" "$known_hosts_path" "$github_meta_path"
+          }
+          trap cleanup EXIT
+
+          umask 077
+          printf '%s\n' "$SOURCE_DEPLOY_KEY" >"$key_path"
+          curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --tlsv1.2 \
+            https://api.github.com/meta >"$github_meta_path"
+          jq -er \
+            '.ssh_keys[] | select(startswith("ssh-ed25519 ")) | "github.com " + .' \
+            "$github_meta_path" >"$known_hosts_path"
+          ssh-keygen -F github.com -f "$known_hosts_path" >/dev/null
+
+          export GIT_SSH_COMMAND="ssh -i $key_path -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts_path"
+          git init --ref-format=reftable source
+          git -C source remote add origin git@github.com:Epoch-ML/zerg.git
+          git -C source fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git -C source fetch --no-tags --depth=1 origin "$EXPECTED_REF:$EXPECTED_REF"
+          git -C source checkout --detach "$EXPECTED_SHA"
+
+      - name: Verify source commit, tag, and updater trust root
+        env:
+          EXPECTED_REF: ${{ needs.validate.outputs.source_ref }}
+          EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
+          RELEASE_CHANNEL: ${{ needs.validate.outputs.channel }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha="$(git -C source rev-parse HEAD)"
+          tag_sha="$(git -C source rev-list -n 1 "$EXPECTED_REF")"
+          [[ "$actual_sha" == "$EXPECTED_SHA" ]]
+          [[ "$tag_sha" == "$EXPECTED_SHA" ]]
+          cmp "release-index/updater-$RELEASE_CHANNEL.pubkey" \
+            "source/ztc/packages/zterm/updater-$RELEASE_CHANNEL.pubkey"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: source/ztc/package-lock.json
+
+      - name: Install locked Node dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund --prefix source/ztc
+          # Colony embeds this ZTC production tree even though ZTerm.app excludes Node.
+          npm audit --omit=dev --audit-level=moderate --prefix source/ztc
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustup target add aarch64-apple-darwin --toolchain "$RUST_TOOLCHAIN"
+          rustup component add rustfmt clippy --toolchain "$RUST_TOOLCHAIN"
+          [[ "$(rustc -vV | sed -n 's/^host: //p')" == "aarch64-apple-darwin" ]]
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: zterm-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('source/ztc/packages/zterm/Cargo.lock') }}
+          restore-keys: |
+            zterm-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Install release audit tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Test, lint, and audit ZTerm
+        working-directory: source/ztc
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx --test \
+            tests/unit/zterm_release.test.ts \
+            tests/unit/zterm_release_rerun.test.ts \
+            tests/unit/zterm_source_release_workflow.test.ts
+          cargo test --locked --manifest-path packages/zterm/Cargo.toml
+          cargo fmt --manifest-path packages/zterm/Cargo.toml -- --check
+          cargo clippy \
+            --locked \
+            --manifest-path packages/zterm/Cargo.toml \
+            --all-targets \
+            -- \
+            -D warnings
+          # quick-xml enters the all-target lockfile only through Linux Wayland code.
+          quick_xml_tree="$(
+            cargo tree --target all -i quick-xml \
+              --locked --manifest-path packages/zterm/Cargo.toml
+          )"
+          grep -F "wayland-scanner" <<<"$quick_xml_tree"
+          macos_quick_xml_tree="$(
+            cargo tree --target aarch64-apple-darwin -i quick-xml \
+              --locked --manifest-path packages/zterm/Cargo.toml 2>&1
+          )"
+          grep -F "nothing to print" <<<"$macos_quick_xml_tree"
+          cargo audit --file packages/zterm/Cargo.lock \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195
+          npm run test:zterm:smoke
+
+      - name: Build release-stamped native binary
+        working-directory: source/ztc
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build \
+            --locked \
+            --release \
+            --target aarch64-apple-darwin \
+            --manifest-path packages/zterm/Cargo.toml
+          binary="packages/zterm/target/aarch64-apple-darwin/release/zterm"
+          [[ -x "$binary" ]]
+          [[ "$(file -b "$binary")" == *"arm64"* ]]
+          [[ "$($binary --version)" == "zterm-$ZTERM_RELEASE_VERSION" ]]
+
+      - name: Package unsigned ZTerm.app
+        working-directory: source/ztc
+        env:
+          ZTERM_BINARY_PATH: packages/zterm/target/aarch64-apple-darwin/release/zterm
+          ZTERM_BUNDLE_DIR: ${{ env.ZTERM_BUNDLE_ROOT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/package-zterm-macos.mjs
+          app="$ZTERM_BUNDLE_ROOT/ZTerm.app"
+          executable="$app/Contents/MacOS/ZTerm"
+          [[ "$($executable --version)" == "zterm-$ZTERM_RELEASE_VERSION" ]]
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+            "$app/Contents/Info.plist" | grep -Fx dev.zerg.zterm
+          expected_bundle_version="${ZTERM_RELEASE_VERSION%%[-+]*}"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+            "$app/Contents/Info.plist" | grep -Fx "$expected_bundle_version"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
+            "$app/Contents/Info.plist" | grep -Fx "$expected_bundle_version"
+
+      - name: Smoke test the unsigned build before credential isolation
+        working-directory: source/ztc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZTERM_SMOKE_BINARY="$ZTERM_BUNDLE_ROOT/ZTerm.app/Contents/MacOS/ZTerm" \
+            node tests/sim/smoke-zterm-desktop.mjs
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        name: Upload unsigned ZTerm application
+        with:
+          name: ${{ needs.validate.outputs.release_tag }}-unsigned-app
+          path: source/ztc/dist/zterm-release-bundle/ZTerm.app
+          if-no-files-found: error
+          retention-days: 14
+
+  apple-sign:
+    name: Sign and notarize without executing product source
+    needs:
+      - validate
+      - build
+    runs-on: macos-15
+    environment:
+      name: zterm-apple-${{ needs.validate.outputs.channel }}
+    permissions:
+      contents: read
+    env:
+      RELEASE_CHANNEL: ${{ needs.validate.outputs.channel }}
+      RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.validate.outputs.release_tag }}-unsigned-app
+          path: unsigned
+
+      - name: Validate the non-executable product payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$GITHUB_WORKSPACE/unsigned/ZTerm.app"
+          executable="$app/Contents/MacOS/ZTerm"
+          [[ -d "$app" ]]
+          [[ -z "$(find "$GITHUB_WORKSPACE/unsigned" -type l -print -quit)" ]]
+          [[ "$(find "$GITHUB_WORKSPACE/unsigned" -type f | wc -l | tr -d ' ')" == "3" ]]
+          [[ -f "$app/Contents/Info.plist" ]]
+          [[ -f "$app/Contents/PkgInfo" ]]
+          [[ -f "$executable" ]]
+          unexpected="$({
+            find "$GITHUB_WORKSPACE/unsigned" -type f \
+              ! -path "$app/Contents/Info.plist" \
+              ! -path "$app/Contents/PkgInfo" \
+              ! -path "$executable"
+          } | head -n 1)"
+          [[ -z "$unexpected" ]]
+          chmod 755 "$executable"
+          [[ "$(file -b "$executable")" == *"arm64"* ]]
+          expected_bundle_version="${RELEASE_VERSION%%[-+]*}"
+          [[ "$expected_bundle_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+            "$app/Contents/Info.plist" | grep -Fx dev.zerg.zterm
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+            "$app/Contents/Info.plist" | grep -Fx ZTerm
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+            "$app/Contents/Info.plist" | grep -Fx "$expected_bundle_version"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
+            "$app/Contents/Info.plist" | grep -Fx "$expected_bundle_version"
+
+      - name: Require and import stable Apple identity
+        if: needs.validate.outputs.channel == 'stable'
+        env:
+          APPLE_API_ISSUER_SECRET: ${{ secrets.ZTERM_APPLE_API_ISSUER }}
+          APPLE_API_KEY_ID_SECRET: ${{ secrets.ZTERM_APPLE_API_KEY_ID }}
+          APPLE_API_PRIVATE_KEY_SECRET: ${{ secrets.ZTERM_APPLE_API_PRIVATE_KEY }}
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.ZTERM_APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD_SECRET: ${{ secrets.ZTERM_APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY_SECRET: ${{ secrets.ZTERM_APPLE_SIGNING_IDENTITY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variable_name in \
+            APPLE_API_ISSUER_SECRET \
+            APPLE_API_KEY_ID_SECRET \
+            APPLE_API_PRIVATE_KEY_SECRET \
+            APPLE_CERTIFICATE_BASE64 \
+            APPLE_CERTIFICATE_PASSWORD_SECRET \
+            APPLE_SIGNING_IDENTITY_SECRET; do
+            if [[ -z "${!variable_name}" ]]; then
+              echo "::error::stable publication requires $variable_name"
+              exit 1
+            fi
+          done
+          [[ "$APPLE_API_KEY_ID_SECRET" =~ ^[0-9A-Za-z]{10,32}$ ]]
+          [[ "$APPLE_API_ISSUER_SECRET" =~ ^[0-9A-Fa-f-]{36}$ ]]
+
+          certificate_path="$RUNNER_TEMP/zterm-developer-id.p12"
+          api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID_SECRET}.p8"
+          keychain_path="$RUNNER_TEMP/zterm-release.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "ZTERM_APPLE_KEYCHAIN=$keychain_path" >>"$GITHUB_ENV"
+          node -e '
+            const fs = require("node:fs");
+            fs.writeFileSync(process.argv[1], Buffer.from(process.env.APPLE_CERTIFICATE_BASE64, "base64"));
+          ' "$certificate_path"
+          printf '%s' "$APPLE_API_PRIVATE_KEY_SECRET" >"$api_key_path"
+          chmod 600 "$certificate_path" "$api_key_path"
+          [[ -s "$certificate_path" && -s "$api_key_path" ]]
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD_SECRET" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" \
+            | grep -F -- "\"$APPLE_SIGNING_IDENTITY_SECRET\"" >/dev/null
+          {
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER_SECRET"
+            echo "APPLE_API_KEY=$APPLE_API_KEY_ID_SECRET"
+            echo "APPLE_API_KEY_PATH=$api_key_path"
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY_SECRET"
+          } >>"$GITHUB_ENV"
+
+      - name: Sign ZTerm without launching its executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$GITHUB_WORKSPACE/unsigned/ZTerm.app"
+          executable="$app/Contents/MacOS/ZTerm"
+          if [[ "$RELEASE_CHANNEL" == "stable" ]]; then
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "$executable"
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "$app"
+          else
+            codesign --force --options runtime --timestamp=none --sign - "$executable"
+            codesign --force --options runtime --timestamp=none --sign - "$app"
+          fi
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      - name: Notarize and staple stable application
+        if: needs.validate.outputs.channel == 'stable'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$GITHUB_WORKSPACE/unsigned/ZTerm.app"
+          app_zip="$RUNNER_TEMP/ZTerm-notarization.zip"
+          result="$RUNNER_TEMP/zterm-app-notarization.json"
+          ditto -c -k --keepParent "$app" "$app_zip"
+          xcrun notarytool submit "$app_zip" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait --output-format json >"$result"
+          jq -e '.status == "Accepted"' "$result" >/dev/null
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose=4 "$app" 2>&1 \
+            | grep -F 'source=Notarized Developer ID'
+
+      - name: Create signed updater archive and disk image
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$GITHUB_WORKSPACE/unsigned/ZTerm.app"
+          mkdir payload
+          archive="$GITHUB_WORKSPACE/payload/ZTerm.app.tar.gz"
+          dmg="$GITHUB_WORKSPACE/payload/ZTerm_${RELEASE_VERSION}_aarch64.dmg"
+          dmg_root="$RUNNER_TEMP/zterm-dmg-root"
+          mkdir -p "$dmg_root"
+          COPYFILE_DISABLE=1 tar -C "$GITHUB_WORKSPACE/unsigned" -czf "$archive" ZTerm.app
+          ditto "$app" "$dmg_root/ZTerm.app"
+          ln -s /Applications "$dmg_root/Applications"
+          hdiutil create \
+            -volname "ZTerm" \
+            -srcfolder "$dmg_root" \
+            -format UDZO \
+            -ov "$dmg"
+          hdiutil verify "$dmg" >/dev/null
+
+      - name: Notarize and staple stable disk image
+        if: needs.validate.outputs.channel == 'stable'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="$GITHUB_WORKSPACE/payload/ZTerm_${RELEASE_VERSION}_aarch64.dmg"
+          result="$RUNNER_TEMP/zterm-dmg-notarization.json"
+          xcrun notarytool submit "$dmg" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait --output-format json >"$result"
+          jq -e '.status == "Accepted"' "$result" >/dev/null
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          hdiutil verify "$dmg" >/dev/null
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        name: Upload Apple-signed ZTerm release payload
+        with:
+          name: ${{ needs.validate.outputs.release_tag }}-apple-signed
+          path: payload/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove temporary Apple identity
+        if: always() && needs.validate.outputs.channel == 'stable'
+        shell: bash
+        run: |
+          if [[ -n "${ZTERM_APPLE_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$ZTERM_APPLE_KEYCHAIN" || true
+          fi
+          rm -f \
+            "$RUNNER_TEMP"/zterm-developer-id.p12 \
+            "$RUNNER_TEMP"/AuthKey_*.p8
+
+  verify-signed:
+    name: Smoke-test the signed application without credentials
+    needs:
+      - validate
+      - apple-sign
+    runs-on: macos-15
+    permissions:
+      contents: read
+    env:
+      RELEASE_CHANNEL: ${{ needs.validate.outputs.channel }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.validate.outputs.release_tag }}-apple-signed
+          path: payload
+
+      - name: Verify and launch the exact signed application
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir app-smoke
+          tar -xzf payload/ZTerm.app.tar.gz -C app-smoke
+          app="$GITHUB_WORKSPACE/app-smoke/ZTerm.app"
+          executable="$app/Contents/MacOS/ZTerm"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          [[ "$($executable --version)" == "zterm-$RELEASE_VERSION" ]]
+          if [[ "$RELEASE_CHANNEL" == "stable" ]]; then
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=4 "$app" 2>&1 \
+              | grep -F 'source=Notarized Developer ID'
+          fi
+
+  sign:
+    name: Sign updater payload in an isolated runner
+    needs:
+      - validate
+      - apple-sign
+      - verify-signed
+    runs-on: ubuntu-24.04
+    environment:
+      name: zterm-updater-${{ needs.validate.outputs.channel }}
+    permissions:
+      contents: read
+    env:
+      RELEASE_CHANNEL: ${{ needs.validate.outputs.channel }}
+      RELEASE_DATE: ${{ needs.validate.outputs.requested_at }}
+      RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: release-index
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: release-index/package-lock.json
+
+      - name: Install locked signer and verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund --prefix release-index
+          npm audit --audit-level=moderate --prefix release-index
+          verifier_archive="$RUNNER_TEMP/minisign-0.12-linux.tar.gz"
+          verifier_root="$RUNNER_TEMP/zterm-release-tools"
+          mkdir -p "$verifier_root"
+          curl --fail --location --silent --show-error \
+            --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 \
+            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz \
+            --output "$verifier_archive"
+          echo \
+            "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $verifier_archive" \
+            | sha256sum -c -
+          tar -xzf "$verifier_archive" -C "$verifier_root"
+          install -m 755 \
+            "$verifier_root/minisign-linux/x86_64/minisign" \
+            "$verifier_root/minisign"
+          [[ "$("$verifier_root/minisign" -v 2>&1)" == *"0.12"* ]]
+          echo "$verifier_root" >>"$GITHUB_PATH"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.validate.outputs.release_tag }}-apple-signed
+          path: unsigned
+
+      - name: Validate unsigned payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_candidates=(unsigned/ZTerm.app.tar.gz)
+          dmg_candidates=(unsigned/ZTerm_*_aarch64.dmg)
+          [[ ${#archive_candidates[@]} -eq 1 && -s "${archive_candidates[0]}" ]]
+          [[ ${#dmg_candidates[@]} -eq 1 && -s "${dmg_candidates[0]}" ]]
+          [[ "$(basename "${dmg_candidates[0]}")" == "ZTerm_${RELEASE_VERSION}_aarch64.dmg" ]]
+
+      - name: Require updater signing credential
+        env:
+          PREVIEW_PRIVATE_KEY: ${{ secrets.ZTERM_PREVIEW_UPDATE_SIGNING_PRIVATE_KEY }}
+          PREVIEW_PRIVATE_KEY_PASSWORD: ${{ secrets.ZTERM_PREVIEW_UPDATE_SIGNING_PRIVATE_KEY_PASSWORD }}
+          STABLE_PRIVATE_KEY: ${{ secrets.ZTERM_STABLE_UPDATE_SIGNING_PRIVATE_KEY }}
+          STABLE_PRIVATE_KEY_PASSWORD: ${{ secrets.ZTERM_STABLE_UPDATE_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_CHANNEL" == "stable" ]]; then
+            private_key="$STABLE_PRIVATE_KEY"
+            private_key_password="$STABLE_PRIVATE_KEY_PASSWORD"
+            credential_name="ZTERM_STABLE_UPDATE_SIGNING_PRIVATE_KEY"
+          else
+            private_key="$PREVIEW_PRIVATE_KEY"
+            private_key_password="$PREVIEW_PRIVATE_KEY_PASSWORD"
+            credential_name="ZTERM_PREVIEW_UPDATE_SIGNING_PRIVATE_KEY"
+          fi
+          [[ -n "$private_key" ]] || {
+            echo "::error::$credential_name is unavailable"
+            exit 1
+          }
+          [[ -n "$private_key_password" ]] || {
+            echo "::error::${credential_name}_PASSWORD is unavailable"
+            exit 1
+          }
+
+      - name: Sign and verify updater archive
+        env:
+          PREVIEW_PRIVATE_KEY: ${{ secrets.ZTERM_PREVIEW_UPDATE_SIGNING_PRIVATE_KEY }}
+          PREVIEW_PRIVATE_KEY_PASSWORD: ${{ secrets.ZTERM_PREVIEW_UPDATE_SIGNING_PRIVATE_KEY_PASSWORD }}
+          STABLE_PRIVATE_KEY: ${{ secrets.ZTERM_STABLE_UPDATE_SIGNING_PRIVATE_KEY }}
+          STABLE_PRIVATE_KEY_PASSWORD: ${{ secrets.ZTERM_STABLE_UPDATE_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_CHANNEL" == "stable" ]]; then
+            private_key="$STABLE_PRIVATE_KEY"
+            private_key_password="$STABLE_PRIVATE_KEY_PASSWORD"
+          else
+            private_key="$PREVIEW_PRIVATE_KEY"
+            private_key_password="$PREVIEW_PRIVATE_KEY_PASSWORD"
+          fi
+          mkdir payload
+          cp unsigned/ZTerm.app.tar.gz payload/ZTerm.app.tar.gz
+          cp "unsigned/ZTerm_${RELEASE_VERSION}_aarch64.dmg" \
+            "payload/ZTerm_${RELEASE_VERSION}_aarch64.dmg"
+          TAURI_PRIVATE_KEY="$private_key" \
+          TAURI_PRIVATE_KEY_PASSWORD="$private_key_password" \
+            release-index/node_modules/.bin/tauri signer sign \
+              payload/ZTerm.app.tar.gz
+          [[ -s payload/ZTerm.app.tar.gz.sig ]]
+          minisign -Vm payload/ZTerm.app.tar.gz \
+            -x <(openssl base64 -d -A -in payload/ZTerm.app.tar.gz.sig) \
+            -p <(openssl base64 -d -A \
+              -in "release-index/updater-$RELEASE_CHANNEL.pubkey")
+
+      - name: Build and verify immutable signed release payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_name="ZTerm.app.tar.gz"
+          signature_name="ZTerm.app.tar.gz.sig"
+          dmg_name="ZTerm_${RELEASE_VERSION}_aarch64.dmg"
+          archive_sha="$(sha256sum "payload/$archive_name" | cut -d' ' -f1)"
+          signature_sha="$(sha256sum "payload/$signature_name" | cut -d' ' -f1)"
+          dmg_sha="$(sha256sum "payload/$dmg_name" | cut -d' ' -f1)"
+          signature="$(tr -d '\r\n' <"payload/$signature_name")"
+          [[ "$signature" =~ ^[0-9A-Za-z+/]+=*$ ]]
+          archive_url="$(
+            node release-index/scripts/release-asset-url.mjs \
+              "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$archive_name"
+          )"
+          apple_notarized=false
+          if [[ "$RELEASE_CHANNEL" == "stable" ]]; then
+            apple_notarized=true
+          fi
+
+          printf '%s  %s\n' "$archive_sha" "$archive_name" \
+            >payload/checksums.txt
+          printf '%s  %s\n' "$signature_sha" "$signature_name" \
+            >>payload/checksums.txt
+          printf '%s  %s\n' "$dmg_sha" "$dmg_name" \
+            >>payload/checksums.txt
+          sort -o payload/checksums.txt payload/checksums.txt
+          jq -n \
+            --arg archive_name "$archive_name" \
+            --arg archive_sha "$archive_sha" \
+            --arg channel "$RELEASE_CHANNEL" \
+            --arg dmg_name "$dmg_name" \
+            --arg dmg_sha "$dmg_sha" \
+            --arg signature_name "$signature_name" \
+            --arg signature_sha "$signature_sha" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg version "$RELEASE_VERSION" \
+            --argjson apple_notarized "$apple_notarized" \
+            '{
+              schema_version: 1,
+              product: "ZTerm",
+              version: $version,
+              channel: $channel,
+              platform: "darwin-aarch64",
+              bundle_identifier: "dev.zerg.zterm",
+              source_sha: $source_sha,
+              apple_notarized: $apple_notarized,
+              artifacts: [
+                {name: $archive_name, sha256: $archive_sha},
+                {name: $signature_name, sha256: $signature_sha},
+                {name: $dmg_name, sha256: $dmg_sha}
+              ]
+            }' >payload/release-metadata.json
+          jq -n \
+            --arg archive_sha "$archive_sha" \
+            --arg archive_url "$archive_url" \
+            --arg notes "ZTerm $RELEASE_CHANNEL release from source $SOURCE_SHA." \
+            --arg pub_date "$RELEASE_DATE" \
+            --arg signature "$signature" \
+            --arg version "$RELEASE_VERSION" \
+            '{
+              schema_version: 1,
+              product: "ZTerm",
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "darwin-aarch64": {
+                  sha256: $archive_sha,
+                  signature: $signature,
+                  url: $archive_url
+                }
+              }
+            }' >payload/latest.json
+
+          (cd payload && sha256sum -c checksums.txt)
+          jq -e \
+            --arg channel "$RELEASE_CHANNEL" \
+            --arg sha "$SOURCE_SHA" \
+            --arg version "$RELEASE_VERSION" \
+            '.product == "ZTerm" and .version == $version and .channel == $channel and .source_sha == $sha and .platform == "darwin-aarch64" and .bundle_identifier == "dev.zerg.zterm"' \
+            payload/release-metadata.json >/dev/null
+          jq -e \
+            --arg version "$RELEASE_VERSION" \
+            '.schema_version == 1 and .product == "ZTerm" and .version == $version and (.platforms["darwin-aarch64"].signature | length > 0)' \
+            payload/latest.json >/dev/null
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        name: Upload signed ZTerm release payload
+        with:
+          name: ${{ needs.validate.outputs.release_tag }}
+          path: payload/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish immutable assets and manifest
+    needs:
+      - validate
+      - sign
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          path: index
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.validate.outputs.release_tag }}
+          path: payload
+
+      - name: Validate publication payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_candidates=(payload/ZTerm.app.tar.gz)
+          signature_candidates=(payload/ZTerm.app.tar.gz.sig)
+          dmg_candidates=(payload/ZTerm_*_aarch64.dmg)
+          [[ ${#archive_candidates[@]} -eq 1 && -f "${archive_candidates[0]}" ]]
+          [[ ${#signature_candidates[@]} -eq 1 && -f "${signature_candidates[0]}" ]]
+          [[ ${#dmg_candidates[@]} -eq 1 && -f "${dmg_candidates[0]}" ]]
+          [[ -s payload/checksums.txt && -s payload/release-metadata.json ]]
+          [[ -s payload/latest.json ]]
+          cd payload
+          shasum -a 256 -c checksums.txt
+          jq -e \
+            --arg version "${{ needs.validate.outputs.version }}" \
+            --arg channel "${{ needs.validate.outputs.channel }}" \
+            --arg sha "${{ needs.validate.outputs.source_sha }}" \
+            '.product == "ZTerm" and .version == $version and .channel == $channel and .source_sha == $sha' \
+            release-metadata.json >/dev/null
+          jq -e \
+            --arg version "${{ needs.validate.outputs.version }}" \
+            '.schema_version == 1 and .product == "ZTerm" and .version == $version and (.platforms["darwin-aarch64"].signature | length > 0)' \
+            latest.json >/dev/null
+
+      - name: Create or resume immutable GitHub Release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ needs.validate.outputs.channel }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+          RELEASE_TARGET_SHA: ${{ needs.validate.outputs.release_target_sha }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve_remote_release_tag() {
+            local remote_refs tag_commit tag_object
+            remote_refs="$(
+              git -C index ls-remote --tags origin \
+                "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}"
+            )"
+            tag_object="$(
+              awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref { print $1 }' \
+                <<<"$remote_refs"
+            )"
+            tag_commit="$(
+              awk -v ref="refs/tags/$RELEASE_TAG^{}" '$2 == ref { print $1 }' \
+                <<<"$remote_refs"
+            )"
+            if [[ -n "$tag_commit" ]]; then
+              printf '%s\n' "$tag_commit"
+            else
+              printf '%s\n' "$tag_object"
+            fi
+          }
+          notes="$RUNNER_TEMP/release-notes.md"
+          printf '%s\n\n%s\n\n%s' \
+            "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)." \
+            "Built from immutable Epoch-ML/zerg source commit \`$SOURCE_SHA\`." \
+            "The updater archive is signed independently from the macOS application signature." \
+            >"$notes"
+          options=(
+            --repo "$GITHUB_REPOSITORY"
+            --target "$RELEASE_TARGET_SHA"
+            --title "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)"
+            --notes-file "$notes"
+          )
+          if [[ "$RELEASE_CHANNEL" == "preview" ]]; then
+            options+=(--prerelease --latest=false)
+          fi
+          tag_target="$(resolve_remote_release_tag)"
+          if [[ -n "$tag_target" && "$tag_target" != "$RELEASE_TARGET_SHA" ]]; then
+            echo "::error::existing release tag does not point to the immutable request commit"
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [[ -z "$tag_target" ]]; then
+              echo "::error::an existing release must have an immutable release tag"
+              exit 1
+            fi
+            echo "Release $RELEASE_TAG exists; validating it without mutation."
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft "${options[@]}"
+          fi
+
+      - name: Validate release metadata and compare every published asset over HTTPS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ needs.validate.outputs.channel }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+          RELEASE_TARGET_SHA: ${{ needs.validate.outputs.release_target_sha }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_json="$RUNNER_TEMP/release.json"
+          notes="$RUNNER_TEMP/expected-release-notes.md"
+          printf '%s\n\n%s\n\n%s' \
+            "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)." \
+            "Built from immutable Epoch-ML/zerg source commit \`$SOURCE_SHA\`." \
+            "The updater archive is signed independently from the macOS application signature." \
+            >"$notes"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$release_json"
+          expected_prerelease=false
+          if [[ "$RELEASE_CHANNEL" == "preview" ]]; then
+            expected_prerelease=true
+          fi
+          jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --arg target "$RELEASE_TARGET_SHA" \
+            --arg title "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)" \
+            --rawfile body "$notes" \
+            --argjson prerelease "$expected_prerelease" \
+            '.tag_name == $tag and
+             .target_commitish == $target and
+             .name == $title and
+             .body == $body and
+             (.draft | type == "boolean") and
+             .prerelease == $prerelease' \
+            "$release_json" >/dev/null
+
+          mapfile -t local_assets < <(
+            find payload -maxdepth 1 -type f -print | sort
+          )
+          [[ ${#local_assets[@]} -gt 0 ]]
+          mapfile -t remote_names < <(jq -r '.assets[].name' "$release_json")
+          for asset_name in "${remote_names[@]}"; do
+            matching_local=0
+            for local_path in "${local_assets[@]}"; do
+              if [[ "$(basename "$local_path")" == "$asset_name" ]]; then
+                matching_local=$((matching_local + 1))
+              fi
+            done
+            if [[ $matching_local -ne 1 ]]; then
+              echo "::error::release contains unexpected or ambiguous asset: $asset_name"
+              exit 1
+            fi
+          done
+
+          verify_dir="$RUNNER_TEMP/published-assets"
+          mkdir -p "$verify_dir"
+          for local_path in "${local_assets[@]}"; do
+            asset_name="$(basename "$local_path")"
+            asset_count="$(
+              jq --arg name "$asset_name" \
+                '[.assets[] | select(.name == $name)] | length' "$release_json"
+            )"
+            if [[ "$asset_count" -eq 0 ]]; then
+              if [[ "$(jq -r .draft "$release_json")" != "true" ]]; then
+                echo "::error::published release is missing immutable asset: $asset_name"
+                exit 1
+              fi
+              gh release upload "$RELEASE_TAG" "$local_path" --repo "$GITHUB_REPOSITORY"
+            elif [[ "$asset_count" -eq 1 ]]; then
+              asset_api_url="$(
+                jq -er --arg name "$asset_name" \
+                  '.assets[] | select(.name == $name) | .url' "$release_json"
+              )"
+              expected_prefix="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/"
+              [[ "$asset_api_url" == "$expected_prefix"* ]] || {
+                echo "::error::asset API URL escaped the release repository"
+                exit 1
+              }
+              curl --fail --location --retry 5 --retry-all-errors \
+                --proto '=https' --tlsv1.2 --silent --show-error \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header "Accept: application/octet-stream" \
+                "$asset_api_url" --output "$verify_dir/$asset_name"
+              cmp "$local_path" "$verify_dir/$asset_name"
+            else
+              echo "::error::release contains duplicate asset names: $asset_name"
+              exit 1
+            fi
+          done
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$release_json"
+          current_draft="$(jq -r .draft "$release_json")"
+          jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --arg target "$RELEASE_TARGET_SHA" \
+            --arg title "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)" \
+            --rawfile body "$notes" \
+            --argjson draft "$current_draft" \
+            --argjson prerelease "$expected_prerelease" \
+            '.tag_name == $tag and
+             .target_commitish == $target and
+             .name == $title and
+             .body == $body and
+             .draft == $draft and
+             .prerelease == $prerelease' \
+            "$release_json" >/dev/null
+          [[ "$(jq '.assets | length' "$release_json")" -eq "${#local_assets[@]}" ]]
+          for local_path in "${local_assets[@]}"; do
+            asset_name="$(basename "$local_path")"
+            asset_api_url="$(
+              jq -er --arg name "$asset_name" \
+                'if ([.assets[] | select(.name == $name)] | length) == 1
+                 then .assets[] | select(.name == $name) | .url
+                 else error("asset set is not exact")
+                 end' "$release_json"
+            )"
+            expected_prefix="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/"
+            [[ "$asset_api_url" == "$expected_prefix"* ]]
+            curl --fail --location --retry 5 --retry-all-errors \
+              --proto '=https' --tlsv1.2 --silent --show-error \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/octet-stream" \
+              "$asset_api_url" --output "$verify_dir/$asset_name"
+            cmp "$local_path" "$verify_dir/$asset_name"
+          done
+
+      - name: Publish fully verified GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ needs.validate.outputs.channel }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+          RELEASE_TARGET_SHA: ${{ needs.validate.outputs.release_target_sha }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve_remote_release_tag() {
+            local remote_refs tag_commit tag_object
+            remote_refs="$(
+              git -C index ls-remote --tags origin \
+                "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}"
+            )"
+            tag_object="$(
+              awk -v ref="refs/tags/$RELEASE_TAG" '$2 == ref { print $1 }' \
+                <<<"$remote_refs"
+            )"
+            tag_commit="$(
+              awk -v ref="refs/tags/$RELEASE_TAG^{}" '$2 == ref { print $1 }' \
+                <<<"$remote_refs"
+            )"
+            if [[ -n "$tag_commit" ]]; then
+              printf '%s\n' "$tag_commit"
+            else
+              printf '%s\n' "$tag_object"
+            fi
+          }
+          release_json="$RUNNER_TEMP/verified-release.json"
+          notes="$RUNNER_TEMP/expected-release-notes.md"
+          printf '%s\n\n%s\n\n%s' \
+            "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)." \
+            "Built from immutable Epoch-ML/zerg source commit \`$SOURCE_SHA\`." \
+            "The updater archive is signed independently from the macOS application signature." \
+            >"$notes"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$release_json"
+          expected_prerelease=false
+          if [[ "$RELEASE_CHANNEL" == "preview" ]]; then
+            expected_prerelease=true
+          fi
+          jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --arg target "$RELEASE_TARGET_SHA" \
+            --arg title "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)" \
+            --rawfile body "$notes" \
+            --argjson prerelease "$expected_prerelease" \
+            '.tag_name == $tag and
+             .target_commitish == $target and
+             .name == $title and
+             .body == $body and
+             (.draft | type == "boolean") and
+             .prerelease == $prerelease' \
+            "$release_json" >/dev/null
+          tag_target="$(resolve_remote_release_tag)"
+          if [[ "$tag_target" != "$RELEASE_TARGET_SHA" ]]; then
+            echo "::error::release tag moved before publication"
+            exit 1
+          fi
+          if [[ "$(jq -r .draft "$release_json")" == "true" ]]; then
+            publish_options=(--repo "$GITHUB_REPOSITORY")
+            if [[ "$RELEASE_CHANNEL" == "preview" ]]; then
+              publish_options+=(--prerelease --latest=false)
+            else
+              publish_options+=(--prerelease=false --latest)
+            fi
+            gh release edit "$RELEASE_TAG" --draft=false "${publish_options[@]}"
+          fi
+
+          tag_target="$(resolve_remote_release_tag)"
+          if [[ "$tag_target" != "$RELEASE_TARGET_SHA" ]]; then
+            echo "::error::published release tag does not point to the immutable request commit"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$release_json"
+          jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --arg target "$RELEASE_TARGET_SHA" \
+            --arg title "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)" \
+            --rawfile body "$notes" \
+            --argjson prerelease "$expected_prerelease" \
+            '.tag_name == $tag and
+             .target_commitish == $target and
+             .name == $title and
+             .body == $body and
+             .draft == false and
+             .immutable == true and
+             .prerelease == $prerelease' \
+            "$release_json" >/dev/null
+          mapfile -t local_assets < <(
+            find payload -maxdepth 1 -type f -print | sort
+          )
+          [[ "$(jq '.assets | length' "$release_json")" -eq "${#local_assets[@]}" ]]
+          public_verify_dir="$RUNNER_TEMP/public-release-assets"
+          mkdir -p "$public_verify_dir"
+          for local_path in "${local_assets[@]}"; do
+            asset_name="$(basename "$local_path")"
+            asset_url="$(
+              jq -er --arg name "$asset_name" \
+                'if ([.assets[] | select(.name == $name)] | length) == 1
+                 then .assets[] | select(.name == $name) | .browser_download_url
+                 else error("asset set is not exact")
+                 end' "$release_json"
+            )"
+            node index/scripts/release-asset-url.mjs \
+              "$asset_url" "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$asset_name" \
+              >/dev/null
+            curl --fail --location --retry 5 --retry-all-errors \
+              --proto '=https' --tlsv1.2 --silent --show-error \
+              "$asset_url" --output "$public_verify_dir/$asset_name"
+            cmp "$local_path" "$public_verify_dir/$asset_name"
+          done
+          manifest_url="$(jq -r '.platforms["darwin-aarch64"].url' payload/latest.json)"
+          archive_url="$(
+            jq -er \
+              '.assets[] | select(.name == "ZTerm.app.tar.gz") | .browser_download_url' \
+              "$release_json"
+          )"
+          canonical_manifest_url="$(
+            node index/scripts/release-asset-url.mjs \
+              "$manifest_url" "$GITHUB_REPOSITORY" "$RELEASE_TAG" \
+              ZTerm.app.tar.gz
+          )"
+          canonical_archive_url="$(
+            node index/scripts/release-asset-url.mjs \
+              "$archive_url" "$GITHUB_REPOSITORY" "$RELEASE_TAG" \
+              ZTerm.app.tar.gz
+          )"
+          [[ "$canonical_manifest_url" == "$canonical_archive_url" ]]
+          cmp payload/ZTerm.app.tar.gz \
+            "$public_verify_dir/ZTerm.app.tar.gz"
+
+  promote-feed:
+    name: Promote monotonic updater feed on release-data
+    needs:
+      - validate
+      - sign
+      - publish
+    runs-on: ubuntu-24.04
+    environment: zterm-feed
+    permissions:
+      contents: read
+    env:
+      RELEASE_CHANNEL: ${{ needs.validate.outputs.channel }}
+      RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: policy
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          path: data
+          ref: release-data
+          ssh-key: ${{ secrets.ZTERM_FEED_DEPLOY_KEY }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.validate.outputs.release_tag }}
+          path: payload
+
+      - name: Commit updater manifest after asset verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C data pull --ff-only origin release-data
+          latest_path="data/site/$RELEASE_CHANNEL/latest.json"
+          metadata_path="data/site/$RELEASE_CHANNEL/releases/$RELEASE_VERSION.json"
+          mkdir -p "$(dirname "$metadata_path")"
+          node policy/scripts/feed-policy.mjs \
+            "$latest_path" payload/latest.json \
+            "$metadata_path" payload/release-metadata.json
+          cp payload/latest.json "$latest_path"
+          cp payload/release-metadata.json "$metadata_path"
+          git -C data config user.name "github-actions[bot]"
+          git -C data config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C data add \
+            "site/$RELEASE_CHANNEL/latest.json" \
+            "site/$RELEASE_CHANNEL/releases/$RELEASE_VERSION.json"
+          if git -C data diff --cached --quiet; then
+            echo "The identical updater manifest is already published."
+          else
+            git -C data commit -m "Publish $RELEASE_TAG updater manifest"
+            git -C data push origin HEAD:release-data
+          fi
+
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: data/site
+
+  deploy-pages:
+    name: Deploy verified updater site
+    needs: promote-feed
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+
+  verify-pages:
+    name: Verify the exact deployed updater feed over HTTPS
+    needs:
+      - validate
+      - sign
+      - deploy-pages
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      RELEASE_CHANNEL: ${{ needs.validate.outputs.channel }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.validate.outputs.release_tag }}
+          path: payload
+
+      - name: Verify the published channel manifest over HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          pages_root="https://epoch-ml.github.io/zterm-releases"
+          deployed_root="${{ needs.deploy-pages.outputs.page_url }}"
+          [[ "$deployed_root" == "$pages_root/" ]]
+          cache_key="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          encoded_version="$(
+            node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' \
+              "$RELEASE_VERSION"
+          )"
+          curl --fail --location --retry 12 --retry-all-errors --retry-delay 5 \
+            --proto '=https' --tlsv1.2 --silent --show-error \
+            "$pages_root/$RELEASE_CHANNEL/latest.json?$cache_key" \
+            --output "$RUNNER_TEMP/live-latest.json"
+          cmp --silent payload/latest.json "$RUNNER_TEMP/live-latest.json"
+          curl --fail --location --retry 12 --retry-all-errors --retry-delay 5 \
+            --proto '=https' --tlsv1.2 --silent --show-error \
+            "$pages_root/$RELEASE_CHANNEL/releases/$encoded_version.json?$cache_key" \
+            --output "$RUNNER_TEMP/live-release-metadata.json"
+          cmp --silent payload/release-metadata.json \
+            "$RUNNER_TEMP/live-release-metadata.json"
