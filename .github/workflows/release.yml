@@ -1430,6 +1430,7 @@ jobs:
             -p "$RUNNER_TEMP/updater.pubkey"
 
           python3 - verified-release/ZTerm.app.tar.gz "$RELEASE_CHANNEL" <<'PY'
+          import struct
           import sys
           import tarfile
 
@@ -1447,6 +1448,8 @@ jobs:
               expected["ZTerm.app/Contents/CodeResources"] = "file"
           max_member_bytes = 512 * 1024 * 1024
           max_expanded_bytes = 1024 * 1024 * 1024
+          executable_name = "ZTerm.app/Contents/MacOS/ZTerm"
+          executable_header = None
           with tarfile.open(sys.argv[1], "r:gz") as archive:
               actual = {}
               expanded_bytes = 0
@@ -1466,6 +1469,11 @@ jobs:
                       expanded_bytes += member.size
                       if expanded_bytes > max_expanded_bytes:
                           raise SystemExit("archive exceeds expanded-size bound")
+                      if member.name == executable_name:
+                          executable = archive.extractfile(member)
+                          if executable is None:
+                              raise SystemExit("archive executable cannot be read")
+                          executable_header = executable.read(8)
                   else:
                       raise SystemExit(
                           f"unsafe archive member type: {member.name}"
@@ -1473,6 +1481,13 @@ jobs:
                   actual[member.name] = kind
           if actual != expected:
               raise SystemExit(f"archive member contract mismatch: {actual!r}")
+          if len(executable_header or b"") != 8:
+              raise SystemExit("archive executable Mach-O header is incomplete")
+          magic, cpu_type = struct.unpack("<II", executable_header)
+          if magic != 0xFEEDFACF or cpu_type != 0x0100000C:
+              raise SystemExit(
+                  "archive executable Mach-O architecture must be 64-bit arm64"
+              )
           PY
           extract_dir="$RUNNER_TEMP/canonical-zterm-app"
           mkdir "$extract_dir"
@@ -1496,7 +1511,6 @@ jobs:
           app="$extract_dir/ZTerm.app"
           executable="$app/Contents/MacOS/ZTerm"
           [[ -x "$executable" && -f "$executable" && ! -L "$executable" ]]
-          file -b "$executable" | grep -F "Mach-O 64-bit executable arm64" >/dev/null
           printf 'APPL????' | cmp - "$app/Contents/PkgInfo"
           [[ -s "$app/Contents/_CodeSignature/CodeResources" ]]
           expected_bundle_version="${RELEASE_VERSION%%[-+]*}"
