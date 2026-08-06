@@ -219,6 +219,7 @@ jobs:
         env:
           EXPECTED_REF: ${{ needs.validate.outputs.source_ref }}
           EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
+          GITHUB_META_TOKEN: ${{ github.token }}
           SOURCE_DEPLOY_KEY: ${{ secrets.ZERG_SOURCE_DEPLOY_KEY }}
         shell: bash
         run: |
@@ -235,6 +236,7 @@ jobs:
           printf '%s\n' "$SOURCE_DEPLOY_KEY" >"$key_path"
           curl --fail --silent --show-error --location --retry 3 \
             --proto '=https' --tlsv1.2 \
+            --header "Authorization: Bearer $GITHUB_META_TOKEN" \
             https://api.github.com/meta >"$github_meta_path"
           jq -er \
             '.ssh_keys[] | select(startswith("ssh-ed25519 ")) | "github.com " + .' \
@@ -246,7 +248,7 @@ jobs:
           git -C source remote add origin git@github.com:Epoch-ML/zerg.git
           git -C source fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
           git -C source fetch --no-tags --depth=1 origin "$EXPECTED_REF:$EXPECTED_REF"
-          git -C source checkout --detach "$EXPECTED_SHA"
+          GIT_LFS_SKIP_SMUDGE=1 git -C source checkout --detach "$EXPECTED_SHA"
 
       - name: Verify source commit, tag, and updater trust root
         env:
