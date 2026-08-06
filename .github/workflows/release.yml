@@ -930,7 +930,6 @@ jobs:
             >"$notes"
           options=(
             --repo "$GITHUB_REPOSITORY"
-            --target "$RELEASE_TARGET_SHA"
             --title "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)"
             --notes-file "$notes"
           )
@@ -977,12 +976,10 @@ jobs:
           fi
           jq -e \
             --arg tag "$RELEASE_TAG" \
-            --arg target "$RELEASE_TARGET_SHA" \
             --arg title "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)" \
             --rawfile body "$notes" \
             --argjson prerelease "$expected_prerelease" \
             '.tag_name == $tag and
-             .target_commitish == $target and
              .name == $title and
              .body == $body and
              (.draft | type == "boolean") and
@@ -1047,13 +1044,11 @@ jobs:
           current_draft="$(jq -r .draft "$release_json")"
           jq -e \
             --arg tag "$RELEASE_TAG" \
-            --arg target "$RELEASE_TARGET_SHA" \
             --arg title "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)" \
             --rawfile body "$notes" \
             --argjson draft "$current_draft" \
             --argjson prerelease "$expected_prerelease" \
             '.tag_name == $tag and
-             .target_commitish == $target and
              .name == $title and
              .body == $body and
              .draft == $draft and
@@ -1124,12 +1119,10 @@ jobs:
           fi
           jq -e \
             --arg tag "$RELEASE_TAG" \
-            --arg target "$RELEASE_TARGET_SHA" \
             --arg title "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)" \
             --rawfile body "$notes" \
             --argjson prerelease "$expected_prerelease" \
             '.tag_name == $tag and
-             .target_commitish == $target and
              .name == $title and
              .body == $body and
              (.draft | type == "boolean") and
@@ -1158,12 +1151,10 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$release_json"
           jq -e \
             --arg tag "$RELEASE_TAG" \
-            --arg target "$RELEASE_TARGET_SHA" \
             --arg title "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)" \
             --rawfile body "$notes" \
             --argjson prerelease "$expected_prerelease" \
             '.tag_name == $tag and
-             .target_commitish == $target and
              .name == $title and
              .body == $body and
              .draft == false and

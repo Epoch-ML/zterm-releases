@@ -737,13 +737,13 @@ test("workflow resumes only an exactly matching immutable GitHub Release", async
   assert.match(workflow, /gh release upload "\$RELEASE_TAG" "\$local_path"/);
   const verification = workflow.slice(verificationIndex);
   assert.match(verification, /\.tag_name == \$tag/);
-  assert.match(verification, /\.target_commitish == \$target/);
+  assert.doesNotMatch(verification, /\.target_commitish == \$target/);
   assert.match(verification, /\.name == \$title/);
   assert.match(verification, /\.prerelease == \$prerelease/);
   assert.match(verification, /cmp "\$local_path" "\$verify_dir\/\$asset_name"/);
   assert.match(workflow, /release_target_sha: \$\{\{ steps\.request\.outputs\.release_target_sha \}\}/);
   assert.match(workflow, /RELEASE_TARGET_SHA: \$\{\{ needs\.validate\.outputs\.release_target_sha \}\}/);
-  assert.match(workflow, /--target "\$RELEASE_TARGET_SHA"/);
+  assert.doesNotMatch(workflow, /--target "\$RELEASE_TARGET_SHA"/);
   assert.match(workflow, /gh release create "\$RELEASE_TAG" --verify-tag/);
   assert.match(workflow, /candidate="requests\/\$\{release_tag\}\.json"/);
   assert.match(workflow, /git show "\$\{request_commit\}:\$candidate" >"\$addition_bytes"/);
