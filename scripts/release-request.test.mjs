@@ -676,7 +676,7 @@ test("workflow pins runner, Node, and verifier tools without duplicate release s
   assert.equal(
     workflow.match(/actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/g)
       ?.length,
-    3,
+    4,
   );
 });
 
@@ -748,7 +748,6 @@ test("workflow pins every GitHub-authored action to an immutable commit", async 
     ["upload-artifact", "ea165f8d65b6e75b540449e92b4886f43607fa02", "v4"],
     ["download-artifact", "d3f86a106a0bac45b974a628896c90dbdf5c8093", "v4"],
     ["configure-pages", "983d7736d9b0ae728b81ab479565c72886d7745b", "v5"],
-    ["upload-pages-artifact", "56afc609e74202658d3ffba0e8f6dda462b719fa", "v3"],
     ["deploy-pages", "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128", "v5"],
   ];
   for (const [action, sha, version] of pins) {
