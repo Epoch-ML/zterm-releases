@@ -904,6 +904,47 @@ test("workflow preserves latest.json as a byte-verified immutable release asset"
   assert.match(immutableGate, /\.browser_download_url/);
 });
 
+test("workflow recovers immutable releases only from canonical public bytes", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const publishJob = workflow.slice(
+    workflow.indexOf("  publish:"),
+    workflow.indexOf("  promote-feed:"),
+  );
+  const promotionJobs = workflow.slice(workflow.indexOf("  promote-feed:"));
+
+  assert.match(
+    publishJob,
+    /was_draft="\$\(jq -r \.draft "\$release_json"\)"/,
+    "immutable retries must be distinguished from fresh drafts",
+  );
+  assert.match(
+    publishJob,
+    /if \[\[ "\$was_draft" == "true" \]\]; then[\s\S]*cmp "\$local_path" "\$canonical_path"[\s\S]*fi/,
+    "only a fresh draft may bind uploaded bytes to regenerated signer output",
+  );
+  assert.match(publishJob, /node index\/scripts\/verify-release-payload\.mjs/);
+  assert.match(publishJob, /name: verified-release/);
+  assert.match(publishJob, /path: verified-release\//);
+  assert.doesNotMatch(
+    publishJob,
+    /cmp "\$local_path" "\$public_verify_dir\/\$asset_name"/,
+    "immutable retries must trust verified released bytes, not regenerated gzip or DMG bytes",
+  );
+  assert.equal(
+    promotionJobs.match(/name: verified-release/g)?.length,
+    2,
+    "feed promotion and Pages verification must consume the canonical release artifact",
+  );
+  assert.doesNotMatch(
+    promotionJobs,
+    /name: \$\{\{ needs\.validate\.outputs\.release_tag \}\}/,
+    "no downstream publication job may consume regenerated signer output",
+  );
+});
+
 test("workflow pins the live release tag before draft creation and after publication", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
