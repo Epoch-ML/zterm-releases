@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "product": "ZTerm",
+  "channel": "preview",
+  "version": "0.1.1-preview.3",
+  "release_tag": "zterm-preview-v0.1.1-preview.3",
+  "source_repository": "Epoch-ML/zerg",
+  "source_sha": "26ac94f6caad5c704d5a25e0e4f646ba8fa148fe",
+  "source_ref": "refs/tags/zterm-preview-v0.1.1-preview.3",
+  "requested_at": "2026-08-06T10:04:05.000Z"
+}
