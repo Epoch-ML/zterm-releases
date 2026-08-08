@@ -565,6 +565,118 @@ test("workflow isolates Apple signing and notarization on a fresh non-executing 
   assert.match(workflow, /sign:\s+[\s\S]*needs:\s+- validate\s+- apple-sign/);
 });
 
+test("stable publication signs and Gatekeeper-assesses the outer disk image", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const appleJob = workflow.slice(
+    workflow.indexOf("  apple-sign:"),
+    workflow.indexOf("  verify-signed:"),
+  );
+  const createStep = appleJob.slice(
+    appleJob.indexOf("Create signed updater archive and disk image"),
+    appleJob.indexOf("Notarize and staple stable disk image"),
+  );
+  const stableDiskImageStep = appleJob.slice(
+    appleJob.indexOf("Notarize and staple stable disk image"),
+    appleJob.indexOf("Upload Apple-signed ZTerm release payload"),
+  );
+
+  assert.match(
+    stableDiskImageStep,
+    /if: needs\.validate\.outputs\.channel == 'stable'/,
+    "the Developer ID disk-image operation must remain stable-only",
+  );
+  assert.doesNotMatch(
+    createStep,
+    /APPLE_SIGNING_IDENTITY|spctl --assess/,
+    "preview disk images must not consume the stable Developer ID identity",
+  );
+
+  const sign = stableDiskImageStep.indexOf("codesign --force --timestamp");
+  const identity = stableDiskImageStep.indexOf(
+    '--sign "$APPLE_SIGNING_IDENTITY" "$dmg"',
+  );
+  const verifyBeforeNotary = stableDiskImageStep.indexOf(
+    'codesign --verify --strict --verbose=2 "$dmg"',
+  );
+  const notarize = stableDiskImageStep.indexOf('xcrun notarytool submit "$dmg"');
+  const staple = stableDiskImageStep.indexOf('xcrun stapler staple "$dmg"');
+  const validateTicket = stableDiskImageStep.indexOf(
+    'xcrun stapler validate "$dmg"',
+  );
+  const verifyAfterStaple = stableDiskImageStep.indexOf(
+    'codesign --verify --strict --verbose=2 "$dmg"',
+    validateTicket,
+  );
+  const assess = stableDiskImageStep.indexOf(
+    'spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"',
+  );
+  const accepted = stableDiskImageStep.indexOf(
+    "grep -F 'source=Notarized Developer ID'",
+  );
+
+  assert.ok(sign >= 0, "the stable outer DMG must be Developer-ID signed");
+  assert.ok(identity > sign, "DMG signing must use the protected stable identity");
+  assert.ok(
+    verifyBeforeNotary > identity && notarize > verifyBeforeNotary,
+    "the DMG signature must verify before notarization",
+  );
+  assert.ok(
+    staple > notarize &&
+      validateTicket > staple &&
+      verifyAfterStaple > validateTicket,
+    "the stapled DMG signature must be verified again",
+  );
+  assert.ok(
+    assess > verifyAfterStaple && accepted > assess,
+    "Gatekeeper must accept the exact signed and notarized DMG",
+  );
+});
+
+test("credential-free verification rejects an unsigned stable disk image", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const verifyJob = workflow.slice(
+    workflow.indexOf("  verify-signed:"),
+    workflow.indexOf("  sign:"),
+  );
+  const diskImage = verifyJob.indexOf(
+    'dmg="$GITHUB_WORKSPACE/payload/ZTerm_${RELEASE_VERSION}_aarch64.dmg"',
+  );
+  const imageIntegrity = verifyJob.indexOf('hdiutil verify "$dmg"');
+  const signature = verifyJob.indexOf(
+    'codesign --verify --strict --verbose=2 "$dmg"',
+  );
+  const ticket = verifyJob.indexOf('xcrun stapler validate "$dmg"');
+  const gatekeeper = verifyJob.indexOf(
+    'spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"',
+  );
+  const accepted = verifyJob.indexOf("grep -F 'source=Notarized Developer ID'", gatekeeper);
+  const stableBranch = verifyJob.indexOf(
+    'if [[ "$RELEASE_CHANNEL" == "stable" ]]; then',
+  );
+  const stableBranchEnd = verifyJob.indexOf("\n          fi", stableBranch);
+
+  assert.ok(diskImage >= 0, "the downloaded signed payload must select the exact DMG");
+  assert.ok(
+    imageIntegrity > diskImage,
+    "every channel must reject a structurally invalid downloaded DMG",
+  );
+  assert.ok(
+    stableBranch > imageIntegrity &&
+      signature > stableBranch &&
+      ticket > signature &&
+      gatekeeper > ticket &&
+      accepted > gatekeeper &&
+      stableBranchEnd > accepted,
+    "stable updater signing must wait for independent DMG signature, ticket, and Gatekeeper proof",
+  );
+});
+
 test("workflow reconstructs and fail-closed validates the flattened unsigned app artifact", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
