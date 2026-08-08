@@ -215,6 +215,7 @@ async function makeFixture(t, request = REQUEST) {
           `ZTerm ${request.version} (${request.channel}).`,
           `Built from immutable Epoch-ML/zerg source commit \`${request.source_sha}\`.`,
           "The updater archive is signed independently from the macOS application signature.",
+          "Bridge notice: ZTC-launched ZTerm 0.1.2 sessions cannot complete this transition in-app. Install this release from the signed DMG once; automatic signed updates with session restoration resume from this release onward.",
         ].join("\n\n"),
         draft: false,
         prerelease: request.channel === "preview",
@@ -241,6 +242,24 @@ test("verifies every canonical public release byte against all release contracts
     result.assetSha256["ZTerm.app.tar.gz"],
     sha256("signed ZTerm archive fixture"),
   );
+});
+
+test("requires the signed-DMG bridge notice for pre-protocol desktop sessions", async (t) => {
+  const fixture = await makeFixture(t);
+  const release = JSON.parse(await readFile(fixture.releaseJsonPath, "utf8"));
+  release.body = [
+    `ZTerm ${fixture.request.version} (${fixture.request.channel}).`,
+    `Built from immutable Epoch-ML/zerg source commit \`${fixture.request.source_sha}\`.`,
+    "The updater archive is signed independently from the macOS application signature.",
+    "Bridge notice: ZTC-launched ZTerm 0.1.2 sessions cannot complete this transition in-app. Install this release from the signed DMG once; automatic signed updates with session restoration resume from this release onward.",
+  ].join("\n\n");
+  await writeFile(fixture.releaseJsonPath, `${JSON.stringify(release, null, 2)}\n`);
+
+  const result = await verifyReleasePayload({
+    ...fixture,
+    repository: REPOSITORY,
+  });
+  assert.equal(result.releaseTag, REQUEST.release_tag);
 });
 
 test("verifies the stable release identity and notarization contract", async (t) => {

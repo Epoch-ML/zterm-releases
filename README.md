@@ -60,6 +60,10 @@ notarization secret, and stable-only updater key is present. A stable client
 also requires the candidate's notarized Developer ID TeamIdentifier to match
 the installed stable app, so a preview/ad-hoc artifact cannot cross channels.
 
+ZTC-launched ZTerm 0.1.2 sessions predate the session-preserving update
+handshake. Install the first protocol-bearing release from its signed DMG once;
+automatic signed updates with session restoration resume from that release.
+
 ## Local verification
 
 ```bash
