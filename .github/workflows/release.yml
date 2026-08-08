@@ -778,7 +778,6 @@ jobs:
             >>payload/checksums.txt
           printf '%s  %s\n' "$dmg_sha" "$dmg_name" \
             >>payload/checksums.txt
-          sort -o payload/checksums.txt payload/checksums.txt
           jq -n \
             --arg archive_name "$archive_name" \
             --arg archive_sha "$archive_sha" \
