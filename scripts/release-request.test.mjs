@@ -1026,6 +1026,34 @@ test("workflow preserves latest.json as a byte-verified immutable release asset"
   assert.match(immutableGate, /\.browser_download_url/);
 });
 
+test("workflow emits primary checksums in the verifier's canonical artifact order", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const buildStep = workflow.indexOf("Build and verify immutable signed release payload");
+  const uploadStep = workflow.indexOf("Upload signed ZTerm release payload", buildStep);
+  const payloadBuilder = workflow.slice(buildStep, uploadStep);
+  const archiveChecksum = payloadBuilder.indexOf(
+    `printf '%s  %s\\n' "$archive_sha" "$archive_name"`,
+  );
+  const signatureChecksum = payloadBuilder.indexOf(
+    `printf '%s  %s\\n' "$signature_sha" "$signature_name"`,
+  );
+  const diskImageChecksum = payloadBuilder.indexOf(
+    `printf '%s  %s\\n' "$dmg_sha" "$dmg_name"`,
+  );
+
+  assert.ok(archiveChecksum >= 0, "archive checksum must be emitted");
+  assert.ok(signatureChecksum > archiveChecksum, "signature checksum must follow the archive");
+  assert.ok(diskImageChecksum > signatureChecksum, "disk image checksum must follow the signature");
+  assert.doesNotMatch(
+    payloadBuilder,
+    /sort\s+-o\s+payload\/checksums\.txt/,
+    "sorting whole checksum lines reorders artifacts by digest instead of canonical name",
+  );
+});
+
 test("workflow recovers immutable releases only from canonical public bytes", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
