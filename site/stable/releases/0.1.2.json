@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "product": "ZTerm",
+  "version": "0.1.2",
+  "channel": "stable",
+  "platform": "darwin-aarch64",
+  "bundle_identifier": "dev.zerg.zterm",
+  "source_sha": "51853fe70b9ae3f907645f9fd9f9c5cab32a3499",
+  "apple_notarized": true,
+  "artifacts": [
+    {
+      "name": "ZTerm.app.tar.gz",
+      "sha256": "41f08bdda201bacd2344866b90d87d850cb3b221ae5eada1bc9aa4f2b9160af0"
+    },
+    {
+      "name": "ZTerm.app.tar.gz.sig",
+      "sha256": "4368ca801f957983a3fbe6641eeb9eed63f65c0140219418ff31b141fe93bff8"
+    },
+    {
+      "name": "ZTerm_0.1.2_aarch64.dmg",
+      "sha256": "12c6668721b805084f841b9539986a21aba152cefaf285ea7ad143132eda4aa9"
+    }
+  ]
+}
