@@ -448,7 +448,7 @@ test("rejects noncanonical signature and checksum encodings", async (t) => {
     const checksums = await readFile(checksumsPath, "utf8");
     await writeFile(checksumsPath, checksums.replace("\n", " trailing\n"));
     await synchronizeReleaseAsset(fixture, "checksums.txt");
-    await expectPayloadError(fixture, /does not exactly bind ZTerm\.app\.tar\.gz/);
+    await expectPayloadError(fixture, /does not exactly bind/);
   }
   {
     const fixture = await makeFixture(t);
@@ -474,7 +474,31 @@ test("rejects noncanonical signature and checksum encodings", async (t) => {
     const checksums = await readFile(checksumsPath, "utf8");
     await writeFile(checksumsPath, `junk${checksums}`);
     await synchronizeReleaseAsset(fixture, "checksums.txt");
-    await expectPayloadError(fixture, /does not exactly bind ZTerm\.app\.tar\.gz/);
+    await expectPayloadError(fixture, /does not exactly bind/);
+  }
+});
+
+test("accepts only the workflow's canonical codepoint checksum order", async (t) => {
+  {
+    const fixture = await makeFixture(t);
+    await replaceSignature(fixture, "AAAA");
+    const checksumsPath = join(fixture.payloadDir, "checksums.txt");
+    const sortedChecksums = (await readFile(checksumsPath, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .sort()
+      .join("\n");
+    await writeFile(checksumsPath, `${sortedChecksums}\n`);
+    await synchronizeReleaseAsset(fixture, "checksums.txt");
+
+    const result = await verifyReleasePayload({ ...fixture, repository: REPOSITORY });
+    assert.equal(result.releaseId, 42);
+    assert.equal(result.assetSha256["ZTerm.app.tar.gz.sig"], sha256("AAAA"));
+  }
+  {
+    const fixture = await makeFixture(t);
+    await replaceSignature(fixture, "AAAA");
+    await expectPayloadError(fixture, /canonical codepoint order/);
   }
 });
 
@@ -658,7 +682,7 @@ test("rejects checksums that do not bind the downloaded archive", async (t) => {
     verifyReleasePayload({ ...fixture, repository: REPOSITORY }),
     (error) => {
       assert.equal(error.name, ReleasePayloadError.name);
-      assert.match(error.message, /checksums\.txt does not exactly bind ZTerm\.app\.tar\.gz/);
+      assert.match(error.message, /checksums\.txt does not exactly bind/);
       return true;
     },
   );

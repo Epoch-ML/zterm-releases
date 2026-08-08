@@ -1026,7 +1026,7 @@ test("workflow preserves latest.json as a byte-verified immutable release asset"
   assert.match(immutableGate, /\.browser_download_url/);
 });
 
-test("workflow emits primary checksums in the verifier's canonical artifact order", async () => {
+test("workflow emits primary checksums in canonical codepoint order", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
     "utf8",
@@ -1045,12 +1045,12 @@ test("workflow emits primary checksums in the verifier's canonical artifact orde
   );
 
   assert.ok(archiveChecksum >= 0, "archive checksum must be emitted");
-  assert.ok(signatureChecksum > archiveChecksum, "signature checksum must follow the archive");
-  assert.ok(diskImageChecksum > signatureChecksum, "disk image checksum must follow the signature");
-  assert.doesNotMatch(
+  assert.ok(signatureChecksum >= 0, "signature checksum must be emitted");
+  assert.ok(diskImageChecksum >= 0, "disk image checksum must be emitted");
+  assert.match(
     payloadBuilder,
-    /sort\s+-o\s+payload\/checksums\.txt/,
-    "sorting whole checksum lines reorders artifacts by digest instead of canonical name",
+    /LC_ALL=C sort -o payload\/checksums\.txt payload\/checksums\.txt/,
+    "the workflow and JavaScript verifier must use the same bytewise ordering",
   );
 });
 
