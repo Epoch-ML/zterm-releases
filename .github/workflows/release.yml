@@ -778,7 +778,7 @@ jobs:
             >>payload/checksums.txt
           printf '%s  %s\n' "$dmg_sha" "$dmg_name" \
             >>payload/checksums.txt
-          sort -o payload/checksums.txt payload/checksums.txt
+          LC_ALL=C sort -o payload/checksums.txt payload/checksums.txt
           jq -n \
             --arg archive_name "$archive_name" \
             --arg archive_sha "$archive_sha" \
@@ -992,31 +992,46 @@ jobs:
           fetch_exact_release() {
             local output_path="$1"
             local max_release_pages=100
-            local page page_count page_json matches_json match_count release_id
+            local max_release_lookup_attempts=12
+            local release_lookup_delay_seconds=5
+            local lookup_attempt page page_count page_json matches_json match_count release_id
             matches_json="$RUNNER_TEMP/release-matches.jsonl"
-            : >"$matches_json"
-            for ((page = 1; page <= max_release_pages; page++)); do
-              page_json="$RUNNER_TEMP/releases-page-$page.json"
-              gh api \
-                "repos/$GITHUB_REPOSITORY/releases?per_page=100&page=$page" \
-                >"$page_json"
-              jq -e 'type == "array" and length <= 100' \
-                "$page_json" >/dev/null
-              jq -c --arg tag "$RELEASE_TAG" \
-                '.[] | select(.tag_name == $tag)' "$page_json" \
-                >>"$matches_json"
-              page_count="$(jq 'length' "$page_json")"
-              if [[ "$page_count" -lt 100 ]]; then
-                break
-              fi
-              if [[ "$page" -eq "$max_release_pages" ]]; then
-                echo "::error::release lookup exceeded bounded pagination"
+            for ((lookup_attempt = 1; lookup_attempt <= max_release_lookup_attempts; lookup_attempt++)); do
+              : >"$matches_json"
+              for ((page = 1; page <= max_release_pages; page++)); do
+                page_json="$RUNNER_TEMP/releases-page-$page.json"
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/releases?per_page=100&page=$page" \
+                  >"$page_json"
+                jq -e 'type == "array" and length <= 100' \
+                  "$page_json" >/dev/null
+                jq -c --arg tag "$RELEASE_TAG" \
+                  '.[] | select(.tag_name == $tag)' "$page_json" \
+                  >>"$matches_json"
+                page_count="$(jq 'length' "$page_json")"
+                if [[ "$page_count" -lt 100 ]]; then
+                  break
+                fi
+                if [[ "$page" -eq "$max_release_pages" ]]; then
+                  echo "::error::release lookup exceeded bounded pagination"
+                  exit 1
+                fi
+              done
+              match_count="$(wc -l <"$matches_json" | tr -d '[:space:]')"
+              if [[ "$match_count" -gt 1 ]]; then
+                echo "::error::expected exactly one release for tag $RELEASE_TAG; found $match_count"
                 exit 1
               fi
+              if [[ "$match_count" -eq 1 ]]; then
+                break
+              fi
+              if [[ "$lookup_attempt" -lt "$max_release_lookup_attempts" ]]; then
+                echo "Release $RELEASE_TAG is not visible yet; retrying exact lookup ($lookup_attempt/$max_release_lookup_attempts)." >&2
+                sleep "$release_lookup_delay_seconds"
+              fi
             done
-            match_count="$(wc -l <"$matches_json" | tr -d '[:space:]')"
             if [[ "$match_count" -ne 1 ]]; then
-              echo "::error::expected exactly one release for tag $RELEASE_TAG; found $match_count"
+              echo "::error::expected exactly one release for tag $RELEASE_TAG after $max_release_lookup_attempts attempts; found $match_count"
               exit 1
             fi
             release_id="$(
@@ -1210,31 +1225,46 @@ jobs:
           fetch_exact_release() {
             local output_path="$1"
             local max_release_pages=100
-            local page page_count page_json matches_json match_count release_id
+            local max_release_lookup_attempts=12
+            local release_lookup_delay_seconds=5
+            local lookup_attempt page page_count page_json matches_json match_count release_id
             matches_json="$RUNNER_TEMP/release-matches.jsonl"
-            : >"$matches_json"
-            for ((page = 1; page <= max_release_pages; page++)); do
-              page_json="$RUNNER_TEMP/releases-page-$page.json"
-              gh api \
-                "repos/$GITHUB_REPOSITORY/releases?per_page=100&page=$page" \
-                >"$page_json"
-              jq -e 'type == "array" and length <= 100' \
-                "$page_json" >/dev/null
-              jq -c --arg tag "$RELEASE_TAG" \
-                '.[] | select(.tag_name == $tag)' "$page_json" \
-                >>"$matches_json"
-              page_count="$(jq 'length' "$page_json")"
-              if [[ "$page_count" -lt 100 ]]; then
-                break
-              fi
-              if [[ "$page" -eq "$max_release_pages" ]]; then
-                echo "::error::release lookup exceeded bounded pagination"
+            for ((lookup_attempt = 1; lookup_attempt <= max_release_lookup_attempts; lookup_attempt++)); do
+              : >"$matches_json"
+              for ((page = 1; page <= max_release_pages; page++)); do
+                page_json="$RUNNER_TEMP/releases-page-$page.json"
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/releases?per_page=100&page=$page" \
+                  >"$page_json"
+                jq -e 'type == "array" and length <= 100' \
+                  "$page_json" >/dev/null
+                jq -c --arg tag "$RELEASE_TAG" \
+                  '.[] | select(.tag_name == $tag)' "$page_json" \
+                  >>"$matches_json"
+                page_count="$(jq 'length' "$page_json")"
+                if [[ "$page_count" -lt 100 ]]; then
+                  break
+                fi
+                if [[ "$page" -eq "$max_release_pages" ]]; then
+                  echo "::error::release lookup exceeded bounded pagination"
+                  exit 1
+                fi
+              done
+              match_count="$(wc -l <"$matches_json" | tr -d '[:space:]')"
+              if [[ "$match_count" -gt 1 ]]; then
+                echo "::error::expected exactly one release for tag $RELEASE_TAG; found $match_count"
                 exit 1
               fi
+              if [[ "$match_count" -eq 1 ]]; then
+                break
+              fi
+              if [[ "$lookup_attempt" -lt "$max_release_lookup_attempts" ]]; then
+                echo "Release $RELEASE_TAG is not visible yet; retrying exact lookup ($lookup_attempt/$max_release_lookup_attempts)." >&2
+                sleep "$release_lookup_delay_seconds"
+              fi
             done
-            match_count="$(wc -l <"$matches_json" | tr -d '[:space:]')"
             if [[ "$match_count" -ne 1 ]]; then
-              echo "::error::expected exactly one release for tag $RELEASE_TAG; found $match_count"
+              echo "::error::expected exactly one release for tag $RELEASE_TAG after $max_release_lookup_attempts attempts; found $match_count"
               exit 1
             fi
             release_id="$(

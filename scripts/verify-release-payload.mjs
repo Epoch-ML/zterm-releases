@@ -124,11 +124,14 @@ function validateChecksums(text, primaryNames, hashes) {
   if (lines.length !== primaryNames.length) {
     fail(`${CHECKSUMS_NAME} must cover exactly the three primary artifacts`);
   }
-  for (const [index, name] of primaryNames.entries()) {
-    const match = /^([0-9a-f]{64})  ([^/\\\r\n]+)$/.exec(lines[index]);
-    if (match === null || match[2] !== name || match[1] !== hashes[name]) {
-      fail(`${CHECKSUMS_NAME} does not exactly bind ${name}`);
-    }
+  const expectedText = `${primaryNames
+    .map((name) => `${hashes[name]}  ${name}`)
+    .sort()
+    .join("\n")}\n`;
+  if (text !== expectedText) {
+    fail(
+      `${CHECKSUMS_NAME} does not exactly bind the three primary artifacts in canonical codepoint order`,
+    );
   }
 }
 

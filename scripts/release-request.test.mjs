@@ -972,6 +972,36 @@ test("workflow resolves draft and published releases through one bounded exact I
   );
 });
 
+test("workflow waits for a newly created draft to become visible through the release list API", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const releaseGates = workflow.slice(
+    workflow.indexOf("Validate release metadata and compare every published asset over HTTPS"),
+    workflow.indexOf("  promote-feed:"),
+  );
+
+  assert.equal(
+    releaseGates.match(/max_release_lookup_attempts=12/g)?.length,
+    2,
+    "both draft verification and publication must tolerate bounded GitHub API visibility lag",
+  );
+  assert.equal(
+    releaseGates.match(/for \(\(lookup_attempt = 1; lookup_attempt <= max_release_lookup_attempts; lookup_attempt\+\+\)\)/g)?.length,
+    2,
+  );
+  assert.equal(
+    releaseGates.match(/sleep "\$release_lookup_delay_seconds"/g)?.length,
+    2,
+  );
+  assert.equal(
+    releaseGates.match(/if \[\[ "\$match_count" -gt 1 \]\]/g)?.length,
+    2,
+    "duplicate releases must still fail closed without retrying",
+  );
+});
+
 test("workflow preserves latest.json as a byte-verified immutable release asset", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
@@ -994,6 +1024,34 @@ test("workflow preserves latest.json as a byte-verified immutable release asset"
   assert.match(immutableGate, /canonical_path="verified-release\/\$asset_name"/);
   assert.match(immutableGate, /cmp "\$local_path" "\$canonical_path"/);
   assert.match(immutableGate, /\.browser_download_url/);
+});
+
+test("workflow emits primary checksums in canonical codepoint order", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const buildStep = workflow.indexOf("Build and verify immutable signed release payload");
+  const uploadStep = workflow.indexOf("Upload signed ZTerm release payload", buildStep);
+  const payloadBuilder = workflow.slice(buildStep, uploadStep);
+  const archiveChecksum = payloadBuilder.indexOf(
+    `printf '%s  %s\\n' "$archive_sha" "$archive_name"`,
+  );
+  const signatureChecksum = payloadBuilder.indexOf(
+    `printf '%s  %s\\n' "$signature_sha" "$signature_name"`,
+  );
+  const diskImageChecksum = payloadBuilder.indexOf(
+    `printf '%s  %s\\n' "$dmg_sha" "$dmg_name"`,
+  );
+
+  assert.ok(archiveChecksum >= 0, "archive checksum must be emitted");
+  assert.ok(signatureChecksum >= 0, "signature checksum must be emitted");
+  assert.ok(diskImageChecksum >= 0, "disk image checksum must be emitted");
+  assert.match(
+    payloadBuilder,
+    /LC_ALL=C sort -o payload\/checksums\.txt payload\/checksums\.txt/,
+    "the workflow and JavaScript verifier must use the same bytewise ordering",
+  );
 });
 
 test("workflow recovers immutable releases only from canonical public bytes", async () => {
