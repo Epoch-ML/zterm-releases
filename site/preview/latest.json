@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "product": "ZTerm",
-  "version": "0.1.1-preview.3",
-  "notes": "ZTerm preview release from source 26ac94f6caad5c704d5a25e0e4f646ba8fa148fe.",
-  "pub_date": "2026-08-06T10:04:05.000Z",
+  "version": "0.1.2-preview.1",
+  "notes": "ZTerm preview release from source 51853fe70b9ae3f907645f9fd9f9c5cab32a3499.",
+  "pub_date": "2026-08-08T06:51:37.000Z",
   "platforms": {
     "darwin-aarch64": {
-      "sha256": "2a14d221e285f726eb930252eb846df8c720534b5e883bcb9b27ac59ed23ac4d",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaC9LcXNEMnJPdnRyZkM5UVJweVdlbzhOY2xtUEk1SE1zZUdMZVV0blVET0VKT3RhYWNKSDJTUXAzL0JWd3FLWkNqRVZZODVKeXYvc3dkTml3aHBnYlpXUncrTERkOVFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2MDE1NDc3CWZpbGU6WlRlcm0uYXBwLnRhci5nego2T0M2YlBic0wrNUYyZ0Nud1QyNnlXYlVXWWlkbjNVZlp0Mk5xUFllWEpscEp2MGl0VFBlNmFIQXNuWXpUNW5KanFhZGVEamlpeE1rL3pPTVQ2VkRBdz09Cg==",
-      "url": "https://github.com/Epoch-ML/zterm-releases/releases/download/zterm-preview-v0.1.1-preview.3/ZTerm.app.tar.gz"
+      "sha256": "5ed8cfab6b1f808308c758eef901b238ca7d9b3ef050857a525511c590d8fda3",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaC9LcXNEMnJPdmxRVVJvTS9PbHVvVGxTT1l1QmQ2TVRXc2R5NXIvOGZMcHpoVVpBRFFIRGdXY3c2T0RRNHlSRVptaGVNSHFzem9POFJiVjM2Q0pWSnpDKzlpaVNneUEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2MTczNzQwCWZpbGU6WlRlcm0uYXBwLnRhci5negplcFExc0lhZFEvQk9NWlVkMUYxOWdQTityR3lBSnQvZ0RIb2pBOEprQTRzNGQrOWVRSWZkbXpwNm1pQndpdjVnTjg3Z1VIWlNZVHEzY1EzTHZ1T0ZBZz09Cg==",
+      "url": "https://github.com/Epoch-ML/zterm-releases/releases/download/zterm-preview-v0.1.2-preview.1/ZTerm.app.tar.gz"
     }
   }
 }
