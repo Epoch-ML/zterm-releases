@@ -937,6 +937,21 @@ test("workflow lets the verified existing tag select the release target", async 
   assert.match(workflow.slice(publishStep, feedJob), /tag_target.*RELEASE_TARGET_SHA/s);
 });
 
+test("workflow tells pre-protocol desktop sessions how to cross the update bridge", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const notice =
+    "Bridge notice: ZTC-launched ZTerm 0.1.2 sessions cannot complete this transition in-app. Install this release from the signed DMG once; automatic signed updates with session restoration resume from this release onward.";
+
+  assert.equal(
+    workflow.split(notice).length - 1,
+    3,
+    "draft creation and both immutable recovery paths must publish the bridge notice",
+  );
+});
+
 test("workflow resolves draft and published releases through one bounded exact ID lookup", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
