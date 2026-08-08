@@ -972,6 +972,36 @@ test("workflow resolves draft and published releases through one bounded exact I
   );
 });
 
+test("workflow waits for a newly created draft to become visible through the release list API", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const releaseGates = workflow.slice(
+    workflow.indexOf("Validate release metadata and compare every published asset over HTTPS"),
+    workflow.indexOf("  promote-feed:"),
+  );
+
+  assert.equal(
+    releaseGates.match(/max_release_lookup_attempts=12/g)?.length,
+    2,
+    "both draft verification and publication must tolerate bounded GitHub API visibility lag",
+  );
+  assert.equal(
+    releaseGates.match(/for \(\(lookup_attempt = 1; lookup_attempt <= max_release_lookup_attempts; lookup_attempt\+\+\)\)/g)?.length,
+    2,
+  );
+  assert.equal(
+    releaseGates.match(/sleep "\$release_lookup_delay_seconds"/g)?.length,
+    2,
+  );
+  assert.equal(
+    releaseGates.match(/if \[\[ "\$match_count" -gt 1 \]\]/g)?.length,
+    2,
+    "duplicate releases must still fail closed without retrying",
+  );
+});
+
 test("workflow preserves latest.json as a byte-verified immutable release asset", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/release.yml", import.meta.url),
