@@ -950,10 +950,11 @@ jobs:
             fi
           }
           notes="$RUNNER_TEMP/release-notes.md"
-          printf '%s\n\n%s\n\n%s' \
+          printf '%s\n\n%s\n\n%s\n\n%s' \
             "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)." \
             "Built from immutable Epoch-ML/zerg source commit \`$SOURCE_SHA\`." \
             "The updater archive is signed independently from the macOS application signature." \
+            "Bridge notice: ZTC-launched ZTerm 0.1.2 sessions cannot complete this transition in-app. Install this release from the signed DMG once; automatic signed updates with session restoration resume from this release onward." \
             >"$notes"
           options=(
             --repo "$GITHUB_REPOSITORY"
@@ -1053,10 +1054,11 @@ jobs:
           }
           release_json="$RUNNER_TEMP/release.json"
           notes="$RUNNER_TEMP/expected-release-notes.md"
-          printf '%s\n\n%s\n\n%s' \
+          printf '%s\n\n%s\n\n%s\n\n%s' \
             "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)." \
             "Built from immutable Epoch-ML/zerg source commit \`$SOURCE_SHA\`." \
             "The updater archive is signed independently from the macOS application signature." \
+            "Bridge notice: ZTC-launched ZTerm 0.1.2 sessions cannot complete this transition in-app. Install this release from the signed DMG once; automatic signed updates with session restoration resume from this release onward." \
             >"$notes"
           fetch_exact_release "$release_json"
           expected_prerelease=false
@@ -1306,10 +1308,11 @@ jobs:
           }
           release_json="$RUNNER_TEMP/verified-release.json"
           notes="$RUNNER_TEMP/expected-release-notes.md"
-          printf '%s\n\n%s\n\n%s' \
+          printf '%s\n\n%s\n\n%s\n\n%s' \
             "ZTerm $RELEASE_VERSION ($RELEASE_CHANNEL)." \
             "Built from immutable Epoch-ML/zerg source commit \`$SOURCE_SHA\`." \
             "The updater archive is signed independently from the macOS application signature." \
+            "Bridge notice: ZTC-launched ZTerm 0.1.2 sessions cannot complete this transition in-app. Install this release from the signed DMG once; automatic signed updates with session restoration resume from this release onward." \
             >"$notes"
           fetch_exact_release "$release_json"
           was_draft="$(jq -r .draft "$release_json")"

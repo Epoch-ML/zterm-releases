@@ -107,6 +107,7 @@ function expectedReleaseBody(request) {
     `ZTerm ${request.version} (${request.channel}).`,
     `Built from immutable Epoch-ML/zerg source commit \`${request.source_sha}\`.`,
     "The updater archive is signed independently from the macOS application signature.",
+    "Bridge notice: ZTC-launched ZTerm 0.1.2 sessions cannot complete this transition in-app. Install this release from the signed DMG once; automatic signed updates with session restoration resume from this release onward.",
   ].join("\n\n");
 }
 
