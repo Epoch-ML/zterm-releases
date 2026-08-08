@@ -78,7 +78,11 @@ async function replaceSignature(fixture, signature) {
     checksums.replace(
       new RegExp(`^[0-9a-f]{64}  ${signatureName.replaceAll(".", "\\.")}$`, "m"),
       `${signatureHash}  ${signatureName}`,
-    ),
+    )
+      .trimEnd()
+      .split("\n")
+      .sort()
+      .join("\n") + "\n",
   );
   await mutateJsonAsset(fixture, "release-metadata.json", (metadata) => {
     metadata.artifacts.find((artifact) => artifact.name === signatureName).sha256 =
@@ -498,6 +502,12 @@ test("accepts only the workflow's canonical codepoint checksum order", async (t)
   {
     const fixture = await makeFixture(t);
     await replaceSignature(fixture, "AAAA");
+    const checksumsPath = join(fixture.payloadDir, "checksums.txt");
+    const canonicalLines = (await readFile(checksumsPath, "utf8"))
+      .trimEnd()
+      .split("\n");
+    await writeFile(checksumsPath, `${canonicalLines.reverse().join("\n")}\n`);
+    await synchronizeReleaseAsset(fixture, "checksums.txt");
     await expectPayloadError(fixture, /canonical codepoint order/);
   }
 });
