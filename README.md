@@ -77,3 +77,42 @@ npm audit --audit-level=moderate
 Mutation testing is intentionally scoped to the untrusted request validator.
 The build workflow itself is covered by explicit ordering, provenance, signing,
 audit, shipped-binary smoke, and feed-promotion contract assertions.
+
+## ZTC signing bridge
+
+`ztc-bridge.yml` is an additive, artifact-only path for the new self-contained
+`ztc.app` distribution. It leaves the ZTerm release workflow, tags, releases and
+feeds unchanged. It reuses the existing `zterm-source`, `zterm-apple-stable` and
+channel-specific updater environments, so no private keys need to be copied or
+exported. Both ZTC channels require Developer ID signing and notarization.
+
+The bridge executes the ZTC publisher policy pinned to
+`Epoch-ML/ztc-releases@bedcdd03c6358268253ad8bf8d465427ee90c69e`.
+Request files are data from that repository's protected `main`: the bridge checks
+that each request has one unchanged, one-file addition commit and that the
+matching immutable public tag points to that commit. The exact source tag and
+npm integrity are then checked by the pinned builder. Advancing the policy pin
+requires another reviewed change here.
+
+After npm publication and the matching source tag and reviewed request/tag in
+`Epoch-ML/ztc-releases` exist, dispatch from this repository's protected `main`:
+
+```sh
+gh workflow run ztc-bridge.yml --repo Epoch-ML/zterm-releases --ref main \
+  -f channel=preview -f version=0.5.0-beta.1 \
+  -f source_sha=639a0d0cc4d6e3eed77db19d937862ab82a36f22
+```
+
+The run ends after validating the signed app and signing its updater archive and
+catalog. Its artifact is named `ztc-desktop-preview-v<version>` (or
+`ztc-desktop-v<version>` for stable), with the eight canonical release files.
+URLs in those files name `Epoch-ML/ztc-releases`, never this signing repository.
+The bridge has read-only repository permissions and no release/feed write step.
+
+An authorized operator can download the artifact with `gh run download`, verify
+its run provenance and every payload hash/signature using the pinned publisher,
+and hand it to the new repository's publication process. Publication still needs
+the immutable request/tag checks, a fresh download and verification of all eight
+GitHub Release assets, matching Homebrew formula and installer, clean-machine
+qualification, monotonic feed promotion, and verification of the deployed feed.
+A successful bridge run alone does not activate a public download.
